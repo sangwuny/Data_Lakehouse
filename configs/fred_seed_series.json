@@ -1,0 +1,611 @@
+[
+  {
+    "series_id": "GDP",
+    "domain": "national_accounts",
+    "priority": "core",
+    "expected_frequency": "quarterly",
+    "description": "Nominal GDP"
+  },
+  {
+    "series_id": "GDPC1",
+    "domain": "national_accounts",
+    "priority": "core",
+    "expected_frequency": "quarterly",
+    "description": "Real GDP"
+  },
+  {
+    "series_id": "GDPDEF",
+    "domain": "national_accounts",
+    "priority": "core",
+    "expected_frequency": "quarterly",
+    "description": "GDP deflator"
+  },
+  {
+    "series_id": "A191RL1Q225SBEA",
+    "domain": "national_accounts",
+    "priority": "core",
+    "expected_frequency": "quarterly",
+    "description": "Real GDP growth rate"
+  },
+  {
+    "series_id": "PCE",
+    "domain": "national_accounts",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Personal consumption expenditures"
+  },
+  {
+    "series_id": "PCEC96",
+    "domain": "national_accounts",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Real personal consumption expenditures"
+  },
+  {
+    "series_id": "GPDI",
+    "domain": "national_accounts",
+    "priority": "extended",
+    "expected_frequency": "quarterly",
+    "description": "Gross private domestic investment"
+  },
+  {
+    "series_id": "NETEXP",
+    "domain": "national_accounts",
+    "priority": "extended",
+    "expected_frequency": "quarterly",
+    "description": "Net exports"
+  },
+  {
+    "series_id": "GCE",
+    "domain": "national_accounts",
+    "priority": "extended",
+    "expected_frequency": "quarterly",
+    "description": "Government consumption expenditures"
+  },
+  {
+    "series_id": "INDPRO",
+    "domain": "production",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Industrial production index"
+  },
+  {
+    "series_id": "UNRATE",
+    "domain": "labor",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Unemployment rate"
+  },
+  {
+    "series_id": "PAYEMS",
+    "domain": "labor",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Nonfarm payroll employment"
+  },
+  {
+    "series_id": "CIVPART",
+    "domain": "labor",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Labor force participation rate"
+  },
+  {
+    "series_id": "EMRATIO",
+    "domain": "labor",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Employment-population ratio"
+  },
+  {
+    "series_id": "ICSA",
+    "domain": "labor",
+    "priority": "core",
+    "expected_frequency": "weekly",
+    "description": "Initial unemployment claims"
+  },
+  {
+    "series_id": "CCSA",
+    "domain": "labor",
+    "priority": "extended",
+    "expected_frequency": "weekly",
+    "description": "Continued unemployment claims"
+  },
+  {
+    "series_id": "JTSJOL",
+    "domain": "labor",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Job openings"
+  },
+  {
+    "series_id": "JTSQUR",
+    "domain": "labor",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Quits rate"
+  },
+  {
+    "series_id": "CES0500000003",
+    "domain": "labor",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Average hourly earnings"
+  },
+  {
+    "series_id": "AWHAETP",
+    "domain": "labor",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Average weekly hours"
+  },
+  {
+    "series_id": "CPIAUCSL",
+    "domain": "inflation",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Consumer price index"
+  },
+  {
+    "series_id": "CPILFESL",
+    "domain": "inflation",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Core CPI"
+  },
+  {
+    "series_id": "PCEPI",
+    "domain": "inflation",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "PCE price index"
+  },
+  {
+    "series_id": "PCEPILFE",
+    "domain": "inflation",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Core PCE price index"
+  },
+  {
+    "series_id": "PPIACO",
+    "domain": "inflation",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Producer price index"
+  },
+  {
+    "series_id": "MICH",
+    "domain": "inflation",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Michigan inflation expectations"
+  },
+  {
+    "series_id": "T5YIE",
+    "domain": "inflation",
+    "priority": "extended",
+    "expected_frequency": "daily",
+    "description": "5-year breakeven inflation rate"
+  },
+  {
+    "series_id": "T10YIE",
+    "domain": "inflation",
+    "priority": "extended",
+    "expected_frequency": "daily",
+    "description": "10-year breakeven inflation rate"
+  },
+  {
+    "series_id": "MEDCPIM158SFRBCLE",
+    "domain": "inflation",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Median CPI"
+  },
+  {
+    "series_id": "FEDFUNDS",
+    "domain": "rates",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Effective federal funds rate"
+  },
+  {
+    "series_id": "SOFR",
+    "domain": "rates",
+    "priority": "extended",
+    "expected_frequency": "daily",
+    "description": "Secured overnight financing rate"
+  },
+  {
+    "series_id": "TB3MS",
+    "domain": "rates",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "3-month treasury bill rate"
+  },
+  {
+    "series_id": "DGS2",
+    "domain": "rates",
+    "priority": "core",
+    "expected_frequency": "daily",
+    "description": "2-year treasury rate"
+  },
+  {
+    "series_id": "DGS5",
+    "domain": "rates",
+    "priority": "extended",
+    "expected_frequency": "daily",
+    "description": "5-year treasury rate"
+  },
+  {
+    "series_id": "DGS10",
+    "domain": "rates",
+    "priority": "core",
+    "expected_frequency": "daily",
+    "description": "10-year treasury rate"
+  },
+  {
+    "series_id": "DGS30",
+    "domain": "rates",
+    "priority": "extended",
+    "expected_frequency": "daily",
+    "description": "30-year treasury rate"
+  },
+  {
+    "series_id": "T10Y2Y",
+    "domain": "rates",
+    "priority": "core",
+    "expected_frequency": "daily",
+    "description": "10-year minus 2-year treasury spread"
+  },
+  {
+    "series_id": "T10Y3M",
+    "domain": "rates",
+    "priority": "core",
+    "expected_frequency": "daily",
+    "description": "10-year minus 3-month treasury spread"
+  },
+  {
+    "series_id": "AAA",
+    "domain": "credit",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "AAA corporate bond yield"
+  },
+  {
+    "series_id": "BAA",
+    "domain": "credit",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "BAA corporate bond yield"
+  },
+  {
+    "series_id": "SP500",
+    "domain": "financial_markets",
+    "priority": "core",
+    "expected_frequency": "daily",
+    "description": "S&P 500 index"
+  },
+  {
+    "series_id": "VIXCLS",
+    "domain": "financial_markets",
+    "priority": "core",
+    "expected_frequency": "daily",
+    "description": "CBOE volatility index"
+  },
+  {
+    "series_id": "M1SL",
+    "domain": "money_credit",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "M1 money stock"
+  },
+  {
+    "series_id": "M2SL",
+    "domain": "money_credit",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "M2 money stock"
+  },
+  {
+    "series_id": "WALCL",
+    "domain": "money_credit",
+    "priority": "core",
+    "expected_frequency": "weekly",
+    "description": "Federal Reserve total assets"
+  },
+  {
+    "series_id": "BUSLOANS",
+    "domain": "money_credit",
+    "priority": "extended",
+    "expected_frequency": "weekly",
+    "description": "Commercial and industrial loans"
+  },
+  {
+    "series_id": "TOTALSL",
+    "domain": "money_credit",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Total consumer credit"
+  },
+  {
+    "series_id": "DPSACBW027SBOG",
+    "domain": "money_credit",
+    "priority": "extended",
+    "expected_frequency": "weekly",
+    "description": "Commercial bank deposits"
+  },
+  {
+    "series_id": "NFCI",
+    "domain": "financial_conditions",
+    "priority": "core",
+    "expected_frequency": "weekly",
+    "description": "Chicago Fed financial conditions index"
+  },
+  {
+    "series_id": "STLFSI4",
+    "domain": "financial_conditions",
+    "priority": "core",
+    "expected_frequency": "weekly",
+    "description": "St. Louis Fed financial stress index"
+  },
+  {
+    "series_id": "PI",
+    "domain": "income_consumption",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Personal income"
+  },
+  {
+    "series_id": "DSPIC96",
+    "domain": "income_consumption",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Real disposable personal income"
+  },
+  {
+    "series_id": "PSAVERT",
+    "domain": "income_consumption",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Personal saving rate"
+  },
+  {
+    "series_id": "RSAFS",
+    "domain": "income_consumption",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Retail and food services sales"
+  },
+  {
+    "series_id": "UMCSENT",
+    "domain": "income_consumption",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Consumer sentiment"
+  },
+  {
+    "series_id": "TDSP",
+    "domain": "income_consumption",
+    "priority": "extended",
+    "expected_frequency": "quarterly",
+    "description": "Household debt service ratio"
+  },
+  {
+    "series_id": "HOUST",
+    "domain": "housing",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Housing starts"
+  },
+  {
+    "series_id": "PERMIT",
+    "domain": "housing",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Building permits"
+  },
+  {
+    "series_id": "HSN1F",
+    "domain": "housing",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "New one family houses sold"
+  },
+  {
+    "series_id": "CSUSHPISA",
+    "domain": "housing",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Case-Shiller home price index"
+  },
+  {
+    "series_id": "MORTGAGE30US",
+    "domain": "housing",
+    "priority": "core",
+    "expected_frequency": "weekly",
+    "description": "30-year fixed mortgage rate"
+  },
+  {
+    "series_id": "MSACSR",
+    "domain": "housing",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Monthly supply of new houses"
+  },
+  {
+    "series_id": "RHORUSQ156N",
+    "domain": "housing",
+    "priority": "extended",
+    "expected_frequency": "quarterly",
+    "description": "Rental vacancy rate"
+  },
+  {
+    "series_id": "TCU",
+    "domain": "business",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Capacity utilization"
+  },
+  {
+    "series_id": "IPMAN",
+    "domain": "business",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Manufacturing production"
+  },
+  {
+    "series_id": "DGORDER",
+    "domain": "business",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Durable goods orders"
+  },
+  {
+    "series_id": "AMTMNO",
+    "domain": "business",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Manufacturers' new orders"
+  },
+  {
+    "series_id": "BUSINV",
+    "domain": "business",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Total business inventories"
+  },
+  {
+    "series_id": "ISRATIO",
+    "domain": "business",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Inventory to sales ratio"
+  },
+  {
+    "series_id": "BOPGSTB",
+    "domain": "trade_fx",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Trade balance"
+  },
+  {
+    "series_id": "EXPGS",
+    "domain": "trade_fx",
+    "priority": "extended",
+    "expected_frequency": "quarterly",
+    "description": "Exports of goods and services"
+  },
+  {
+    "series_id": "IMPGS",
+    "domain": "trade_fx",
+    "priority": "extended",
+    "expected_frequency": "quarterly",
+    "description": "Imports of goods and services"
+  },
+  {
+    "series_id": "DTWEXBGS",
+    "domain": "trade_fx",
+    "priority": "extended",
+    "expected_frequency": "daily",
+    "description": "Trade-weighted U.S. dollar index"
+  },
+  {
+    "series_id": "DEXKOUS",
+    "domain": "trade_fx",
+    "priority": "core",
+    "expected_frequency": "daily",
+    "description": "Korean won to U.S. dollar exchange rate"
+  },
+  {
+    "series_id": "DEXJPUS",
+    "domain": "trade_fx",
+    "priority": "extended",
+    "expected_frequency": "daily",
+    "description": "Japanese yen to U.S. dollar exchange rate"
+  },
+  {
+    "series_id": "DEXUSEU",
+    "domain": "trade_fx",
+    "priority": "extended",
+    "expected_frequency": "daily",
+    "description": "U.S. dollar to euro exchange rate"
+  },
+  {
+    "series_id": "GFDEBTN",
+    "domain": "fiscal",
+    "priority": "extended",
+    "expected_frequency": "quarterly",
+    "description": "Federal debt"
+  },
+  {
+    "series_id": "GFDEGDQ188S",
+    "domain": "fiscal",
+    "priority": "extended",
+    "expected_frequency": "quarterly",
+    "description": "Federal debt to GDP"
+  },
+  {
+    "series_id": "FYFSD",
+    "domain": "fiscal",
+    "priority": "extended",
+    "expected_frequency": "annual",
+    "description": "Federal surplus or deficit"
+  },
+  {
+    "series_id": "DCOILWTICO",
+    "domain": "commodities",
+    "priority": "core",
+    "expected_frequency": "daily",
+    "description": "WTI crude oil price"
+  },
+  {
+    "series_id": "DCOILBRENTEU",
+    "domain": "commodities",
+    "priority": "extended",
+    "expected_frequency": "daily",
+    "description": "Brent crude oil price"
+  },
+  {
+    "series_id": "GASREGW",
+    "domain": "commodities",
+    "priority": "extended",
+    "expected_frequency": "weekly",
+    "description": "Regular gasoline price"
+  },
+  {
+    "series_id": "DHHNGSP",
+    "domain": "commodities",
+    "priority": "extended",
+    "expected_frequency": "daily",
+    "description": "Henry Hub natural gas price"
+  },
+  {
+    "series_id": "WPU10210501",
+    "domain": "commodities",
+    "priority": "extended",
+    "expected_frequency": "monthly",
+    "description": "Producer price index for gold ores"
+  },
+  {
+    "series_id": "USREC",
+    "domain": "business_cycle",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "NBER recession indicator"
+  },
+  {
+    "series_id": "USRECD",
+    "domain": "business_cycle",
+    "priority": "extended",
+    "expected_frequency": "daily",
+    "description": "Daily NBER recession indicator"
+  },
+  {
+    "series_id": "CFNAI",
+    "domain": "business_cycle",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Chicago Fed national activity index"
+  }
+]
