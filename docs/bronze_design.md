@@ -18,16 +18,19 @@ data/bronze/fred/
   raw/
     source=fred/
       series_id=GDP/
-        collected_at=20260615T120000Z/
-          metadata.json
-          observations.json
-          vintages.json
-          request_manifest.json
+        collection_date=2026-06-15/
+          run_id=20260615T120000Z/
+            metadata.json
+            observations.json
+            vintages.json
+            request_manifest.json
   tables/
     series_id=GDP/
-      observations.jsonl
-      metadata.jsonl
-      vintage_dates.jsonl
+      collection_date=2026-06-15/
+        run_id=20260615T120000Z/
+          observations.jsonl
+          metadata.jsonl
+          vintage_dates.jsonl
   logs/
     collection_log.jsonl
     run_summary_<run_id>.json
@@ -35,7 +38,7 @@ data/bronze/fred/
 
 ## 시간 정합성 필드
 
-`tables/series_id=<SERIES_ID>/observations.jsonl`에는 다음 필드를 둔다.
+`tables/series_id=<SERIES_ID>/collection_date=<YYYY-MM-DD>/run_id=<RUN_ID>/observations.jsonl`에는 다음 필드를 둔다.
 
 ```text
 series_id
@@ -52,6 +55,7 @@ units
 seasonal_adjustment
 collected_at_utc
 run_id
+collection_date
 observations_raw_path
 metadata_raw_path
 manifest_path
@@ -62,7 +66,9 @@ request_params_hash
 
 `period_start_inferred`와 `period_end_inferred`는 월별, 분기별, 연간 데이터의 기간 경계를 분석 단계에서 명시적으로 다루기 위한 보조 필드다. Bronze에서는 값을 바꾸지 않고, FRED의 observation date와 frequency metadata를 기준으로 추정 경계만 남긴다.
 
-통합 `tables/observations.jsonl`은 만들지 않는다. 수천 개 이상의 시계열을 다룰 때 단일 JSONL 파일이 너무 커져 탐색과 디버깅이 어려워지기 때문이다. 대신 series 단위로 partition된 `tables/series_id=<SERIES_ID>/...`를 Silver 계층의 입력으로 사용한다.
+통합 `tables/observations.jsonl`은 만들지 않는다. 수천 개 이상의 시계열을 다룰 때 단일 JSONL 파일이 너무 커져 탐색과 디버깅이 어려워지기 때문이다. 대신 series, collection date, run id 단위로 partition된 `tables/series_id=<SERIES_ID>/collection_date=<YYYY-MM-DD>/run_id=<RUN_ID>/...`를 Silver 계층의 입력으로 사용한다.
+
+`run_id`는 같은 날짜에 여러 번 수집한 실행을 구분하기 위한 정확한 실행 식별자다. `collection_date`는 날짜 단위 탐색과 재처리를 위한 상위 partition이다.
 
 ## 실행 예시
 

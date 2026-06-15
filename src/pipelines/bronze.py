@@ -22,6 +22,13 @@ def utc_stamp(moment: datetime | None = None) -> str:
     return (moment or utc_now()).strftime("%Y%m%dT%H%M%SZ")
 
 
+def collection_date_from_run_id(run_id: str) -> str:
+    try:
+        return datetime.strptime(run_id, "%Y%m%dT%H%M%SZ").date().isoformat()
+    except ValueError:
+        return utc_now().date().isoformat()
+
+
 def iso_utc(moment: datetime | None = None) -> str:
     return (moment or utc_now()).isoformat()
 
@@ -114,6 +121,7 @@ class BronzeFredCollector:
     def __init__(self, settings: Settings, *, run_id: str | None = None) -> None:
         self.settings = settings
         self.run_id = run_id or utc_stamp()
+        self.collection_date = collection_date_from_run_id(self.run_id)
         self.paths = BronzePaths(
             raw_dir=settings.fred_bronze_root / "raw",
             tables_dir=settings.fred_bronze_root / "tables",
@@ -127,7 +135,13 @@ class BronzeFredCollector:
             return path.as_posix()
 
     def series_table_path(self, series_id: str, filename: str) -> Path:
-        return self.paths.tables_dir / f"series_id={series_id}" / filename
+        return (
+            self.paths.tables_dir
+            / f"series_id={series_id}"
+            / f"collection_date={self.collection_date}"
+            / f"run_id={self.run_id}"
+            / filename
+        )
 
     def load_catalog(self, catalog_path: Path) -> list[SeriesSpec]:
         payload = json.loads(catalog_path.read_text(encoding="utf-8"))
@@ -164,6 +178,7 @@ class BronzeFredCollector:
         if dry_run:
             return {
                 "run_id": self.run_id,
+                "collection_date": self.collection_date,
                 "dry_run": True,
                 "series_count": len(specs),
                 "series_ids": [spec.series_id for spec in specs],
@@ -172,6 +187,7 @@ class BronzeFredCollector:
         client = FredClient(self.settings.fred_api_key)
         summary = {
             "run_id": self.run_id,
+            "collection_date": self.collection_date,
             "dry_run": False,
             "series_count": len(specs),
             "succeeded": 0,
@@ -215,7 +231,8 @@ class BronzeFredCollector:
             self.paths.raw_dir
             / "source=fred"
             / f"series_id={spec.series_id}"
-            / f"collected_at={self.run_id}"
+            / f"collection_date={self.collection_date}"
+            / f"run_id={self.run_id}"
         )
         try:
             metadata = client.series_metadata(spec.series_id)
@@ -291,6 +308,7 @@ class BronzeFredCollector:
 
             log_row = {
                 "run_id": self.run_id,
+                "collection_date": self.collection_date,
                 "source": "fred",
                 "series_id": spec.series_id,
                 "status": "success",
@@ -310,6 +328,7 @@ class BronzeFredCollector:
         except FredApiError as exc:
             log_row = {
                 "run_id": self.run_id,
+                "collection_date": self.collection_date,
                 "source": "fred",
                 "series_id": spec.series_id,
                 "status": "failed",
@@ -336,6 +355,7 @@ class BronzeFredCollector:
 
         return {
             "run_id": self.run_id,
+            "collection_date": self.collection_date,
             "source": "fred",
             "series_id": spec.series_id,
             "domain": spec.domain,
@@ -366,6 +386,7 @@ class BronzeFredCollector:
         series = (metadata.payload.get("seriess") or [{}])[0]
         return {
             "run_id": self.run_id,
+            "collection_date": self.collection_date,
             "source": "fred",
             "series_id": spec.series_id,
             "domain": spec.domain,
@@ -406,6 +427,7 @@ class BronzeFredCollector:
             period = infer_period_bounds(item.get("date"), series.get("frequency_short"))
             yield {
                 "run_id": self.run_id,
+                "collection_date": self.collection_date,
                 "source": "fred",
                 "series_id": spec.series_id,
                 "domain": spec.domain,
@@ -438,6 +460,7 @@ class BronzeFredCollector:
         for vintage_date in vintages.payload.get("vintage_dates", []):
             yield {
                 "run_id": self.run_id,
+                "collection_date": self.collection_date,
                 "source": "fred",
                 "series_id": spec.series_id,
                 "domain": spec.domain,
