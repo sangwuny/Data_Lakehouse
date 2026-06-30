@@ -1,0 +1,202 @@
+﻿[
+  {
+    "rank": 1,
+    "series_id": "GDPC1",
+    "domain": "national_accounts",
+    "priority": "core",
+    "expected_frequency": "quarterly",
+    "description": "Real Gross Domestic Product",
+    "role": "실질 경제성장",
+    "alfred_available": true
+  },
+  {
+    "rank": 2,
+    "series_id": "PCE",
+    "domain": "income_consumption",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Personal Consumption Expenditures",
+    "role": "소비 수요",
+    "alfred_available": true
+  },
+  {
+    "rank": 3,
+    "series_id": "W875RX1",
+    "domain": "income_consumption",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Real Personal Income excluding Current Transfer Receipts",
+    "role": "실질 소득",
+    "alfred_available": false
+  },
+  {
+    "rank": 4,
+    "series_id": "PAYEMS",
+    "domain": "labor",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "All Employees: Total Nonfarm Payrolls",
+    "role": "고용 규모",
+    "alfred_available": true
+  },
+  {
+    "rank": 5,
+    "series_id": "UNRATE",
+    "domain": "labor",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Unemployment Rate",
+    "role": "노동시장 상태",
+    "alfred_available": true
+  },
+  {
+    "rank": 6,
+    "series_id": "ICSA",
+    "domain": "labor",
+    "priority": "core",
+    "expected_frequency": "weekly",
+    "description": "Initial Claims",
+    "role": "노동시장 선행 신호",
+    "alfred_available": true
+  },
+  {
+    "rank": 7,
+    "series_id": "AWHMAN",
+    "domain": "labor",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Average Weekly Hours: Manufacturing",
+    "role": "제조업 경기 선행",
+    "alfred_available": true
+  },
+  {
+    "rank": 8,
+    "series_id": "INDPRO",
+    "domain": "production",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Industrial Production Index",
+    "role": "생산 활동",
+    "alfred_available": true
+  },
+  {
+    "rank": 9,
+    "series_id": "CMRMTSPL",
+    "domain": "production",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Real Manufacturing and Trade Industries Sales",
+    "role": "실물 판매",
+    "alfred_available": false
+  },
+  {
+    "rank": 10,
+    "series_id": "CPIAUCSL",
+    "domain": "inflation",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Consumer Price Index: All Items",
+    "role": "대표 물가",
+    "alfred_available": true
+  },
+  {
+    "rank": 11,
+    "series_id": "PCEPILFE",
+    "domain": "inflation",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Core PCE Price Index",
+    "role": "기조 인플레이션",
+    "alfred_available": true
+  },
+  {
+    "rank": 12,
+    "series_id": "FEDFUNDS",
+    "domain": "rates",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Effective Federal Funds Rate",
+    "role": "통화정책",
+    "alfred_available": true
+  },
+  {
+    "rank": 13,
+    "series_id": "GS10",
+    "domain": "rates",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "10-Year Treasury Constant Maturity Rate",
+    "role": "장기금리",
+    "alfred_available": true
+  },
+  {
+    "rank": 14,
+    "series_id": "T10YFFM",
+    "domain": "rates",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "10-Year Treasury minus Federal Funds Rate",
+    "role": "장단기 금리 spread",
+    "alfred_available": false
+  },
+  {
+    "rank": 15,
+    "series_id": "M2SL",
+    "domain": "money_credit",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "M2 Money Stock",
+    "role": "통화량",
+    "alfred_available": true
+  },
+  {
+    "rank": 16,
+    "series_id": "BAMLH0A0HYM2",
+    "domain": "credit",
+    "priority": "core",
+    "expected_frequency": "daily",
+    "description": "ICE BofA US High Yield Index Option-Adjusted Spread",
+    "role": "신용위험",
+    "alfred_available": false
+  },
+  {
+    "rank": 17,
+    "series_id": "SP500",
+    "domain": "financial_markets",
+    "priority": "core",
+    "expected_frequency": "daily",
+    "description": "S&P 500",
+    "role": "금융시장 / 자산가격",
+    "alfred_available": false
+  },
+  {
+    "rank": 18,
+    "series_id": "PERMIT",
+    "domain": "housing",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "Building Permits: Total Units",
+    "role": "주택 경기 선행",
+    "alfred_available": true
+  },
+  {
+    "rank": 19,
+    "series_id": "NEWORDER",
+    "domain": "investment",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "New Orders: Nondefense Capital Goods ex. Aircraft",
+    "role": "기업투자 선행",
+    "alfred_available": true
+  },
+  {
+    "rank": 20,
+    "series_id": "UMCSENT",
+    "domain": "sentiment",
+    "priority": "core",
+    "expected_frequency": "monthly",
+    "description": "University of Michigan Consumer Sentiment",
+    "role": "소비자 심리",
+    "alfred_available": true
+  }
+]

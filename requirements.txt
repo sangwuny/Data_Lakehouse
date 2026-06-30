@@ -1,2 +1,0 @@
-# Bronze layer currently uses only the Python standard library.
-# Later Silver/Gold layers can add pandas, pyarrow, statsmodels, etc.

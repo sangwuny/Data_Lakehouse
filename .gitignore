@@ -1,9 +1,6 @@
-.env
+﻿.env
 __pycache__/
 *.pyc
 .pytest_cache/
 .ipynb_checkpoints/
-data/bronze/fred/raw/
-data/bronze/fred/tables/
-data/bronze/fred/logs/
-data/silver/
+data/

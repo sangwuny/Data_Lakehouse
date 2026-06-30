@@ -1,80 +1,54 @@
-# Causal-Aware Time Series Lakehouse
+﻿# FRED Lakehouse
 
-FRED API 기반의 인과 분석용 불규칙 혼합빈도 시계열 데이터 레이크하우스 프로젝트다.
+Databricks Lakehouse project for FRED/ALFRED economic time-series data.
 
-현재 구현 범위는 Bronze 계층과 Silver 계층이다.
+The active implementation uses Databricks notebooks, Delta Lake, and Unity Catalog. Files are organized by Medallion layer under `notebooks/databricks`.
 
-## Bronze 계층
-
-Bronze는 FRED API 원본 응답과 수집 맥락을 append-only 방식으로 저장한다.
-
-주요 기능:
-
-- `.env` 기반 FRED API key 관리
-- 대표 경제 시계열 seed catalog 관리
-- FRED metadata, observations, optional vintage dates 수집
-- raw JSON 원본 저장
-- Silver 입력용 series/date/run별 normalized JSONL 생성
-- collection log와 run summary 생성
-- request manifest에서 API key 자동 redaction
-- 월별/분기별/연간 observation date의 추정 기간 경계 기록
-- optional vintage date table 생성
-
-Bronze 저장 구조:
+## Active Layout
 
 ```text
-data/bronze/fred/
-  raw/source=fred/series_id=<ID>/collection_date=<YYYY-MM-DD>/run_id=<RUN_ID>/
-  tables/series_id=<ID>/collection_date=<YYYY-MM-DD>/run_id=<RUN_ID>/
-  logs/
+notebooks/databricks/
+  configs/
+    fred_seed_series.json
+  bronze/
+    01a_bronze_fred_bootstrap_versions.py
+    01b_bronze_fred_incremental_versions.py
+    01c_bronze_fred_current_observations.py
+  silver/
+    02a_silver_fred_bootstrap_versions.py
+    02b_silver_fred_incremental_versions.py
+  gold/
+    03a_gold_fred_bootstrap_causal_features.py
+    03b_gold_fred_incremental_causal_features.py
+docs/
+  bronze_layer.md
 ```
 
-## 준비
+## Bronze Direction
 
-`.env` 파일에 다음 값을 둔다.
+The main Bronze pipeline is vintage-date based, not dense daily physical snapshots.
 
-```env
-FRED_API_KEY=your_fred_api_key_here
+- `notebooks/databricks/bronze/01a_bronze_fred_bootstrap_versions.py` performs the initial ALFRED-capable revision-history load.
+- `notebooks/databricks/bronze/01b_bronze_fred_incremental_versions.py` performs incremental ALFRED vintage-date checks and loads only changed revision windows.
+- `notebooks/databricks/bronze/01c_bronze_fred_current_observations.py` handles FRED-only current observations, such as series without ALFRED revision history.
+
+The seed catalog lives at `notebooks/databricks/configs/fred_seed_series.json`.
+
+```text
+alfred_available = true   -> bronze/01a + bronze/01b
+alfred_available = false  -> bronze/01c
 ```
 
-## 실행
+## Typical Execution
 
-대상 series 확인:
-
-```bash
-python -m src.pipelines.bronze --dry-run --priority core --limit 5
+```text
+1. Run bronze/01a once for ALFRED-capable Bronze history.
+2. Run silver/02a once to build Silver from Bronze versions.
+3. Schedule bronze/01b for incremental Bronze revision checks.
+4. Schedule silver/02b after bronze/01b for incremental Silver cleaning.
+5. Run bronze/01c separately for FRED-only current series.
+6. Run gold/03a once for initial causal features.
+7. Schedule gold/03b after silver/02b for incremental causal features.
 ```
 
-Bronze 수집:
-
-```bash
-python -m src.pipelines.bronze --priority core --limit 5
-```
-
-vintage date metadata 포함:
-
-```bash
-python -m src.pipelines.bronze --priority core --limit 5 --include-vintages
-```
-
-## Silver 계층
-
-Silver는 Bronze의 series별 table을 읽어 결측치, 중복, 이상치 flag와 데이터 계보를 포함한 정제 테이블을 생성한다.
-
-대상 series 확인:
-
-```bash
-python -m src.pipelines.silver --dry-run --series GDP UNRATE
-```
-
-특정 Bronze 수집 날짜 기준 확인:
-
-```bash
-python -m src.pipelines.silver --dry-run --collection-date 2026-06-15
-```
-
-Silver 정제 실행:
-
-```bash
-python -m src.pipelines.silver
-```
+See `docs/bronze_layer.md` for the detailed Bronze operating pattern.
