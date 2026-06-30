@@ -50,6 +50,7 @@ notebooks/databricks/
     01a_bronze_fred_bootstrap_versions.py
     01b_bronze_fred_incremental_versions.py
     01c_bronze_fred_current_observations.py
+    01e_bronze_alfred_reproducibility_audit.py
   silver/
     02a_silver_fred_bootstrap_versions.py
     02b_silver_fred_incremental_versions.py
@@ -58,7 +59,7 @@ notebooks/databricks/
     03b_gold_fred_incremental_causal_features.py
 ```
 
-현재 운영의 중심은 `bronze/01a`, `bronze/01b`, `bronze/01c`, `silver/02a`, `silver/02b`, `gold/03a`, `gold/03b`이다. 이전 로컬 Python 실행 코드, SnapshotVersion 실험 코드, 예전 단일 Bronze/Silver/Gold notebook은 더 이상 현재 운영 기준이 아니다.
+현재 운영의 중심은 `bronze/01a`, `bronze/01b`, `bronze/01c`, `bronze/01e`, `silver/02a`, `silver/02b`, `gold/03a`, `gold/03b`이다. 이전 로컬 Python 실행 코드, 과거 snapshot 실험 코드, 예전 단일 Bronze/Silver/Gold notebook은 더 이상 현재 운영 기준이 아니다.
 
 ## 4. Seed catalog
 
@@ -222,6 +223,25 @@ source, series_id, observation_date
 ```
 
 따라서 같은 observation date가 이미 저장되어 있으면 반복 실행해도 같은 값을 계속 append하지 않는다.
+
+### 6.4 `bronze/01e_bronze_alfred_reproducibility_audit.py`
+
+내부 point-in-time 복원값이 ALFRED의 특정 vintage 응답과 일치하는지 외부 대조한다. 이 notebook은 ALFRED API에 `vintage_dates = as_of_date`를 넣어 직접 받은 값과, Bronze `fred_observation_versions`에서 `realtime_start <= as_of_date <= realtime_end` 조건으로 복원한 값을 비교한다.
+
+권장 실행 파라미터 예시는 다음과 같다.
+
+```text
+catalog = fred_lakehouse
+bronze_schema = bronze
+series_ids = GDPC1,UNRATE,CPIAUCSL
+as_of_dates = 2015-01-01,2020-04-01,2024-01-01
+observation_start = 2010-01-01
+observation_end =
+max_observations_per_series = 0
+fail_on_mismatch = false
+```
+
+결과는 별도 Delta table에 저장하지 않고 notebook 화면에 summary와 mismatch row로 표시하며, 마지막에 JSON summary를 반환한다. `match_status <> 'match'`가 존재하면 내부 재현 로직과 ALFRED 응답이 일치하지 않는다는 의미이므로 원인을 확인해야 한다.
 
 ## 7. Databricks 기능 사용 방식
 
@@ -407,31 +427,63 @@ FRED API 호출은 너무 촘촘하면 일시적 HTTP 오류나 네트워크 오
 
 대량 bootstrap에서는 안정성을 위해 `sleep_seconds`를 너무 공격적으로 낮추지 않는 것이 좋고, FRED-only current 적재처럼 호출량이 상대적으로 작으면 `sleep_seconds = 0`으로 시작해도 된다.
 
-## 12. 운영 순서
+## 12. Bronze 재현성 검증 기준
+
+교수님 피드백의 핵심은 단순히 Bronze table이 잘 생성되었는지가 아니라, 우리가 구현한 point-in-time 재현 로직이 실제 ALFRED 특정 시점 응답을 정확히 복원하는지 확인하는 것이다. 이 프로젝트에서는 `bronze/01e_bronze_alfred_reproducibility_audit.py`를 Bronze 재현성 검증 단계로 둔다.
+
+검증 관점은 다음과 같다.
+
+| 관점 | 확인 내용 |
+|---|---|
+| 내부 복원값 | `fred_observation_versions`에서 `realtime_start <= as_of_date <= realtime_end`, `available_at <= as_of_date` 조건으로 특정 시점 값을 복원 |
+| 외부 기준값 | ALFRED API에 `vintage_dates = as_of_date`를 넣어 같은 시점의 값을 직접 조회 |
+| row-level 대조 | `series_id + as_of_date + observation_date` 단위로 내부값과 외부값 비교 |
+| mismatch 판정 | `value_mismatch`, `missing_internal`, `missing_external` 여부 확인 |
+
+검증 결과는 별도 table에 저장하지 않고 notebook output과 JSON summary로 반환한다.
+
+따라서 Bronze 적재 후에는 사용자가 선택한 `series_ids`, `as_of_dates`에 대해 `01e`를 실행하고 summary의 `values_match = true`, `mismatch_count = 0`인지 확인해야 한다.
+
+### 12.1 ALFRED 재현성 대조와 원 기관 대조의 차이
+
+`01e`는 ALFRED API를 기준 truth로 삼는다. 즉 “ALFRED에서 특정 날짜의 vintage 값을 다시 요청했을 때”와 “우리 Bronze table의 `realtime_start`, `realtime_end`, `available_at` 조건으로 복원한 값”이 일치하는지를 검증한다.
+
+원 기관 발표값과의 직접 대조는 별도 검증 단계가 필요하다. 예를 들어 `GDPC1`은 BEA, `CPIAUCSL`과 `UNRATE`는 BLS, `GS10`과 `M2SL`은 Federal Reserve 계열 원천을 확인해야 한다. 기관별 API, series code, release table, 단위, 계절조정 방식이 서로 다르므로 다음과 같은 별도 mapping이 있어야 한다.
+
+```text
+fred_series_id -> official_source -> official_dataset/table/series_code -> unit/frequency adjustment rule
+```
+
+현재 Bronze의 재현성 검증 범위는 ALFRED/FRED가 제공한 vintage history를 정확히 보존하고 복원하는지까지이다. 원 기관 직접 대조는 FRED/ALFRED 외부의 cross-source validation으로 분리해서 구현하는 것이 맞다.
+
+## 13. 운영 순서
 
 권장 실행 순서는 다음과 같다.
 
 ```text
 1. bronze/01a를 한 번 실행해 ALFRED-capable 전체 history를 적재한다.
-2. fred_observation_versions와 fred_vintage_dates_seen을 검증한다.
-3. silver/02a를 한 번 실행해 Silver versioned table을 만든다.
-4. bronze/01b를 Lakeflow Jobs로 주기 실행한다.
-5. bronze/01b 이후 silver/02b를 실행해 변경된 series만 정제한다.
-6. FRED-only series는 bronze/01c로 별도 적재한다.
-7. gold/03a 또는 gold/03b로 분석용 feature mart를 생성한다.
+2. bronze/01c를 실행해 FRED-only current series를 별도로 적재한다.
+3. bronze/01e를 실행해 대표 series/as_of_date의 ALFRED 재현성을 대조한다.
+4. silver/02a를 한 번 실행해 Silver versioned table을 만든다.
+5. gold/03a로 초기 분석용 feature mart를 생성한다.
+6. 이후 bronze/01b를 Lakeflow Jobs로 주기 실행한다.
+7. 필요 시 bronze/01e로 표본 as-of date 재현성을 대조한다.
+8. silver/02b를 실행해 변경된 series만 정제한다.
+9. gold/03b로 증분 feature mart를 갱신한다.
 ```
 
 일반적인 daily workflow는 다음과 같이 구성할 수 있다.
 
 ```text
 bronze/01b_bronze_fred_incremental_versions.py
+-> bronze/01e_bronze_alfred_reproducibility_audit.py
 -> silver/02b_silver_fred_incremental_versions.py
 -> gold/03b_gold_fred_incremental_causal_features.py
 ```
 
 FRED-only current series는 별도 workflow 또는 같은 Job의 별도 task로 `bronze/01c`를 실행하면 된다.
 
-## 13. 요약
+## 14. 요약
 
 Bronze 계층은 다음 역할을 수행한다.
 
@@ -444,6 +496,7 @@ Bronze 계층은 다음 역할을 수행한다.
 | 증분 수집 지원 | series별 watermark와 vintage date 확인으로 효율적 증분 적재 지원 |
 | FRED-only 분리 | ALFRED revision history가 없는 series는 별도 current table에 저장 |
 | 계보 추적 기반 제공 | Silver/Gold에서 어떤 Bronze run과 API 요청에서 온 데이터인지 추적 가능 |
+| 재현성 대조 | 내부 PIT 복원값과 ALFRED 특정 vintage 응답값의 일치 여부 검증 |
 
 Bronze는 이후 Silver 계층의 정제와 Gold 계층의 인과 후보 탐색이 신뢰 가능하도록 만드는 가장 기초적인 저장 계층이다.
 

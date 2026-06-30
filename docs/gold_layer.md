@@ -1,4 +1,4 @@
-# Gold 계층 문서
+﻿# Gold 계층 문서
 
 이 문서는 FRED/ALFRED 데이터 Lakehouse의 Gold 계층 설계를 설명한다. 기준 언어는 한국어이며, 현재 저장소의 Databricks notebook, Delta Lake, Unity Catalog 기반 serving mart 구조를 다룬다.
 

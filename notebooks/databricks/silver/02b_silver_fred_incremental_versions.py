@@ -19,7 +19,7 @@ from typing import Any
 dbutils.widgets.text("catalog", "fred_lakehouse", "Catalog")
 dbutils.widgets.text("bronze_schema", "bronze", "Bronze schema")
 dbutils.widgets.text("silver_schema", "silver", "Silver schema")
-dbutils.widgets.text("series_ids", "ALL", "Series IDs: GDP,UNRATE or ALL")
+dbutils.widgets.text("series_ids", "ALL", "Series IDs: GDPC1,UNRATE or ALL")
 dbutils.widgets.text("bronze_run_id", "", "Bronze run ID, blank = since last Silver watermark")
 dbutils.widgets.text("outlier_threshold", "6.0", "Robust z-score outlier threshold")
 dbutils.widgets.dropdown("include_missing_in_silver", "true", ["true", "false"], "Keep missing rows")
