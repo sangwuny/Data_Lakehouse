@@ -946,13 +946,14 @@ spark.sql(
         scored.pair_count / counts.target_period_count AS coverage_rate,
         scored.pearson_corr,
         abs(scored.pearson_corr) AS abs_pearson_corr,
-        abs(scored.pearson_corr) * (scored.pair_count / counts.target_period_count) AS candidate_score,
+        power(scored.pearson_corr, 2) AS r_squared,
+        power(scored.pearson_corr, 2) * (scored.pair_count / counts.target_period_count) AS candidate_score,
         scored.avg_candidate_quality_warning_count,
         scored.avg_candidate_outlier_count,
         scored.revised_period_count,
         DENSE_RANK() OVER (
             PARTITION BY scored.as_of_date, scored.target_frequency, scored.aggregation_method, scored.transform_type, scored.target_series_id
-            ORDER BY abs(scored.pearson_corr) * (scored.pair_count / counts.target_period_count) DESC NULLS LAST
+            ORDER BY power(scored.pearson_corr, 2) * (scored.pair_count / counts.target_period_count) DESC NULLS LAST
         ) AS candidate_rank,
         sha2(concat_ws('|', scored.as_of_date, scored.target_frequency, scored.aggregation_method, scored.transform_type, scored.target_series_id, scored.candidate_series_id, scored.lag_periods), 256) AS gold_relationship_candidate_score_id
     FROM scored
