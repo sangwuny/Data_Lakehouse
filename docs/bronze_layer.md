@@ -1,4 +1,4 @@
-﻿# Bronze 계층 문서
+# Bronze 계층 문서
 
 이 문서는 FRED/ALFRED 데이터 Lakehouse의 Bronze 계층 설계를 설명한다. 기준 언어는 한국어이며, 현재 저장소의 Databricks notebook, Delta Lake, Unity Catalog 기반 구조만 다룬다.
 
@@ -54,12 +54,14 @@ notebooks/databricks/
   silver/
     02a_silver_fred_bootstrap_versions.py
     02b_silver_fred_incremental_versions.py
+    02c_silver_fred_current_observations.py
   gold/
     03a_gold_fred_bootstrap_causal_features.py
     03b_gold_fred_incremental_causal_features.py
+    03c_gold_fred_current_indicators.py
 ```
 
-현재 운영의 중심은 `bronze/01a`, `bronze/01b`, `bronze/01c`, `bronze/01e`, `silver/02a`, `silver/02b`, `gold/03a`, `gold/03b`이다. 이전 로컬 Python 실행 코드, 과거 snapshot 실험 코드, 예전 단일 Bronze/Silver/Gold notebook은 더 이상 현재 운영 기준이 아니다.
+현재 운영의 중심은 `bronze/01a`, `bronze/01b`, `bronze/01c`, `bronze/01e`, `silver/02a`, `silver/02b`, `silver/02c`, `gold/03a`, `gold/03b`, `gold/03c`이다. 이전 로컬 Python 실행 코드, 과거 snapshot 실험 코드, 예전 단일 Bronze/Silver/Gold notebook은 더 이상 현재 운영 기준이 아니다.
 
 ## 4. Seed catalog
 
@@ -222,7 +224,7 @@ seed_catalog_path = ../configs/fred_seed_series.json
 source, series_id, observation_date
 ```
 
-따라서 같은 observation date가 이미 저장되어 있으면 반복 실행해도 같은 값을 계속 append하지 않는다.
+따라서 같은 observation date가 이미 저장되어 있으면 반복 실행해도 같은 값을 계속 append하지 않는다. 다만 FRED current 값 또는 FRED 응답의 real-time 범위가 바뀐 경우에는 동일 key row를 최신 값으로 update한다.
 
 ### 6.4 `bronze/01e_bronze_alfred_reproducibility_audit.py`
 
@@ -361,7 +363,7 @@ ALFRED revision history가 없는 FRED-only series의 현재 관측값을 저장
 | `load_type` | 현재 `fred_current_observations` |
 | `attempts` | API request 재시도 후 성공 attempt 수 |
 
-병합 key는 다음과 같다.
+병합 key는 다음과 같다. 이 테이블은 FRED current 최신 상태 mirror로 사용하므로, 같은 key에서 `value_raw`, `realtime_start`, `realtime_end`가 달라지면 기존 row를 update한다.
 
 ```text
 source, series_id, observation_date
@@ -411,11 +413,11 @@ Bronze는 재실행을 전제로 설계한다. 같은 notebook을 다시 실행�
 | `fred_observation_versions` | `observation_version_id` 기준 MERGE |
 | `fred_vintage_dates_seen` | `source`, `series_id`, `vintage_date` 기준 MERGE |
 | `fred_incremental_watermarks` | `source`, `series_id` 기준 MERGE |
-| `fred_current_observations_raw` | `source`, `series_id`, `observation_date` 기준 MERGE |
+| `fred_current_observations_raw` | `source`, `series_id`, `observation_date` 기준 MERGE, current 값 변경 시 UPDATE |
 | `fred_ingestion_runs` | append-only |
 | `fred_run_summary` | append-only |
 
-`MERGE` 대상 테이블은 동일 데이터가 다시 들어오면 `seen_count`와 마지막 확인 관련 메타데이터를 갱신한다. 로그성 테이블은 실행 이력 자체가 의미 있으므로 append-only로 남긴다.
+`MERGE` 대상 테이블은 동일 데이터가 다시 들어오면 `seen_count`와 마지막 확인 관련 메타데이터를 갱신한다. `fred_current_observations_raw`는 `seen_count`가 없는 current mirror이므로 동일 key의 current 값이 바뀐 경우 최신 row로 갱신한다. 로그성 테이블은 실행 이력 자체가 의미 있으므로 append-only로 남긴다.
 
 ## 11. API 호출 속도와 retry 전략
 
@@ -465,11 +467,15 @@ fred_series_id -> official_source -> official_dataset/table/series_code -> unit/
 2. bronze/01c를 실행해 FRED-only current series를 별도로 적재한다.
 3. bronze/01e를 실행해 대표 series/as_of_date의 ALFRED 재현성을 대조한다.
 4. silver/02a를 한 번 실행해 Silver versioned table을 만든다.
-5. gold/03a로 초기 분석용 feature mart를 생성한다.
-6. 이후 bronze/01b를 Lakeflow Jobs로 주기 실행한다.
-7. 필요 시 bronze/01e로 표본 as-of date 재현성을 대조한다.
-8. silver/02b를 실행해 변경된 series만 정제한다.
-9. gold/03b로 증분 feature mart를 갱신한다.
+5. silver/02c를 실행해 FRED-only current table을 정제한다.
+6. gold/03a로 초기 분석용 feature mart를 생성한다.
+7. gold/03c로 최신 통합 dashboard mart를 생성한다.
+8. 이후 bronze/01b를 Lakeflow Jobs로 주기 실행한다.
+9. 필요 시 bronze/01e로 표본 as-of date 재현성을 대조한다.
+10. silver/02b를 실행해 변경된 ALFRED series만 정제한다.
+11. bronze/01c와 silver/02c로 FRED-only current series를 갱신한다.
+12. gold/03b로 증분 feature mart를 갱신한다.
+13. gold/03c로 최신 통합 dashboard mart를 갱신한다.
 ```
 
 일반적인 daily workflow는 다음과 같이 구성할 수 있다.
@@ -479,9 +485,13 @@ bronze/01b_bronze_fred_incremental_versions.py
 -> bronze/01e_bronze_alfred_reproducibility_audit.py
 -> silver/02b_silver_fred_incremental_versions.py
 -> gold/03b_gold_fred_incremental_causal_features.py
+
+bronze/01c_bronze_fred_current_observations.py
+-> silver/02c_silver_fred_current_observations.py
+-> gold/03c_gold_fred_current_indicators.py
 ```
 
-FRED-only current series는 별도 workflow 또는 같은 Job의 별도 task로 `bronze/01c`를 실행하면 된다.
+FRED-only current series는 별도 workflow 또는 같은 Job의 별도 task로 `bronze/01c`, `silver/02c`, `gold/03c`를 순서대로 실행하면 된다.
 
 ## 14. 요약
 
@@ -499,4 +509,3 @@ Bronze 계층은 다음 역할을 수행한다.
 | 재현성 대조 | 내부 PIT 복원값과 ALFRED 특정 vintage 응답값의 일치 여부 검증 |
 
 Bronze는 이후 Silver 계층의 정제와 Gold 계층의 인과 후보 탐색이 신뢰 가능하도록 만드는 가장 기초적인 저장 계층이다.
-

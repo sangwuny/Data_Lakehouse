@@ -26,6 +26,7 @@ notebooks/databricks/
   silver/
     02a_silver_fred_bootstrap_versions.py
     02b_silver_fred_incremental_versions.py
+    02c_silver_fred_current_observations.py
   gold/
     03a_gold_fred_bootstrap_causal_features.py
     03b_gold_fred_incremental_causal_features.py
@@ -59,9 +60,9 @@ Silver cleans and conforms ALFRED-capable Bronze observation versions into `fred
 
 ### Gold
 
-Gold builds serving marts for as-of observations, period features, transformed long-format features, feature snapshots, and causal candidate scores.
+Gold builds serving marts for strict point-in-time causal analysis and current integrated dashboard analytics.
 
-The current Gold structure includes `fred_transformed_features_long`, which stores comparable transformed values such as `pct_change_12`, `log_diff_12`, `z_score_full_sample`, and `index_base100`.
+For strict ALFRED point-in-time analysis, use `fred_transformed_features_long`. For final integrated visualization across ALFRED current and FRED current-only series, use `fred_current_indicators_long`.
 
 ## Typical Execution
 
@@ -71,13 +72,17 @@ Initial build:
 2. bronze/01c_bronze_fred_current_observations.py for FRED-only current series
 3. bronze/01e_bronze_alfred_reproducibility_audit.py for ALFRED point-in-time spot checks
 4. silver/02a_silver_fred_bootstrap_versions.py
-5. gold/03a_gold_fred_bootstrap_causal_features.py
+5. silver/02c_silver_fred_current_observations.py for FRED-only current series
+6. gold/03a_gold_fred_bootstrap_causal_features.py
+7. gold/03c_gold_fred_current_indicators.py for integrated current dashboards
 
 Incremental workflow:
 1. bronze/01b_bronze_fred_incremental_versions.py
 2. bronze/01e_bronze_alfred_reproducibility_audit.py for scheduled sample as-of dates
 3. silver/02b_silver_fred_incremental_versions.py
-4. gold/03b_gold_fred_incremental_causal_features.py
+4. silver/02c_silver_fred_current_observations.py for refreshed FRED-only current series
+5. gold/03b_gold_fred_incremental_causal_features.py
+6. gold/03c_gold_fred_current_indicators.py for refreshed integrated current dashboards
 ```
 
 ## Documentation

@@ -1,4 +1,4 @@
-﻿# Gold 계층 문서
+# Gold 계층 문서
 
 이 문서는 FRED/ALFRED 데이터 Lakehouse의 Gold 계층 설계를 설명한다. 기준 언어는 한국어이며, 현재 저장소의 Databricks notebook, Delta Lake, Unity Catalog 기반 serving mart 구조를 다룬다.
 
@@ -13,21 +13,24 @@ Gold 계층은 Silver 계층의 정제된 데이터를 분석 목적에 맞게 �
 2. daily, monthly, quarterly, annual, native 기준 period feature를 만든다.
 3. 단위가 다른 경제지표를 비교할 수 있도록 공통 long-format 변환값을 생성한다.
 4. target series와 candidate series 간 lag correlation을 계산한다.
-5. Feature Store 또는 downstream ML에서 사용할 수 있는 snapshot table을 제공한다.
+5. ALFRED current와 FRED current-only series를 통합한 dashboard mart를 제공한다.
+6. Feature Store 또는 downstream ML에서 사용할 수 있는 snapshot table을 제공한다.
 ```
 
-Gold는 최종 인과 모델 자체가 아니라, 인과 분석과 예측 실험을 시작하기 위한 serving mart이다.
+Gold는 최종 인과 모델 자체가 아니라, 인과 분석과 예측 실험을 시작하기 위한 serving mart이다. 동시에 최신 지표 시각화를 위해 ALFRED current와 FRED current-only를 통합한 current indicator mart도 제공한다.
 
 ## 2. 입력과 출력
 
-현재 Gold 계층은 Silver의 revision-aware cleaned table을 입력으로 사용한다.
+현재 Gold 계층은 목적에 따라 입력을 나눈다.
 
 ```text
-Input : fred_lakehouse.silver.fred_observation_versions_cleaned
-Output: fred_lakehouse.gold.*
+Strict PIT / causal input : fred_lakehouse.silver.fred_observation_versions_cleaned
+Current dashboard input   : fred_lakehouse.silver.fred_observation_versions_cleaned
+                          + fred_lakehouse.silver.fred_current_observations_cleaned
+Output                    : fred_lakehouse.gold.*
 ```
 
-`bronze/01c`에서 적재한 FRED-only current data는 현재 Gold causal feature mart에 자동으로 합쳐지지 않는다. 엄격한 point-in-time 분석에서는 revision-aware Silver table을 기준으로 하는 것이 현재 설계 원칙이다.
+`bronze/01c`와 `silver/02c`에서 관리하는 FRED-only current data는 Gold causal feature mart에는 자동으로 합치지 않는다. 엄격한 point-in-time 분석에서는 revision-aware Silver table을 기준으로 한다. 대신 최신 대시보드와 일반 시각화는 `gold.fred_current_indicators_long`에서 ALFRED current와 FRED current-only를 통합해서 사용한다.
 
 ## 3. Repository 구조
 
@@ -37,10 +40,12 @@ Gold 관련 notebook은 다음 위치에 있다.
 notebooks/databricks/gold/
   03a_gold_fred_bootstrap_causal_features.py
   03b_gold_fred_incremental_causal_features.py
+  03c_gold_fred_current_indicators.py
 ```
 
 - `03a`는 최초 전체 Gold feature mart를 구축한다.
-- `03b`는 Silver 변경분을 기준으로 Gold mart를 증분 갱신한다.
+- 3b는 Silver 변경분을 기준으로 Gold causal mart를 증분 갱신한다.
+- 3c는 ALFRED current와 FRED current-only를 통합한 최신 dashboard mart를 만든다.
 
 ## 4. Gold 테이블과 뷰
 
@@ -63,8 +68,12 @@ fred_lakehouse.gold
 ├── fred_causal_candidate_scores
 ├── fred_gold_quality_report
 ├── fred_gold_run_summary
+├── fred_current_indicators_long
+├── fred_current_indicator_run_summary
 ├── fred_latest_feature_snapshot       (view)
-└── fred_top_causal_candidates         (view)
+├── fred_top_causal_candidates         (view)
+├── fred_latest_current_indicators     (view)
+└── fred_current_indicator_comparison  (view)
 ```
 
 ## 5. 주요 파라미터
@@ -88,6 +97,8 @@ include_quality_warnings = true
 optimize_tables = true
 ```
 
+`03c` current indicator mart는 추가로 `base_index_date`를 받을 수 있다. blank이면 series별 첫 period를 100으로 두고 `index_base100`을 계산한다.
+
 `causal_transform_type`은 causal candidate score를 어떤 값으로 계산할지 고르는 파라미터다. 기본값 `raw`는 기존처럼 period 대표값을 그대로 사용한다.
 
 지원 transform type은 다음과 같다.
@@ -106,7 +117,7 @@ optimize_tables = true
 
 ## 6. 처리 흐름
 
-Gold notebook은 크게 다섯 단계로 동작한다.
+`03a`와 `03b`의 causal mart는 크게 다섯 단계로 동작한다.
 
 ```text
 1. as-of observation 선택
@@ -232,6 +243,24 @@ coverage_rate   = pair_count / target_period_count
 ```
 
 결과는 `fred_causal_candidate_scores`에 저장된다. 이 점수는 인과성을 증명하는 결과가 아니라, 추가 검토할 후보를 줄여주는 screening signal이다.
+### 6.6 Current indicator mart 생성
+
+`03c`는 최신 시각화용 mart를 만든다. 이 경로는 strict point-in-time 재현 목적이 아니라 dashboard와 일반 분석 목적이다.
+
+```text
+silver.fred_observation_versions_cleaned   # ALFRED current rows
++ silver.fred_current_observations_cleaned # FRED current-only rows
+-> gold.fred_current_indicators_long
+```
+
+`fred_current_indicators_long`은 period별 대표값과 함께 다음 공통 변환 컬럼을 wide column으로 제공한다.
+
+```text
+value_numeric, change_1, change_12, pct_change_1, pct_change_12,
+log_diff_1, log_diff_12, z_score_full_sample, index_base100
+```
+
+`fred_current_indicator_comparison` view는 같은 값을 `transform_type`, `transformed_value` long-format으로 펼쳐서 dashboard filter에 쓰기 좋게 만든다.
 
 ## 7. 테이블별 역할과 key
 
@@ -305,6 +334,27 @@ Incremental Gold는 이 테이블의 `processed_at_utc`를 다음 실행의 wate
 ### 7.9 `fred_top_causal_candidates`
 
 `fred_causal_candidate_scores`에서 최신 as-of 기준 상위 candidate만 보여주는 view이다. 현재 `candidate_rank <= 20` 조건을 사용한다.
+### 7.10 `fred_current_indicators_long`
+
+최종 통합 시각화의 기본 테이블이다. ALFRED current row와 FRED current-only row를 같은 schema로 맞춘 뒤 target frequency 기준으로 집계한다.
+
+```text
+Key: target_frequency, aggregation_method, series_id, period_start
+```
+
+주요 컬럼은 `value_numeric`, `pct_change_1`, `pct_change_12`, `z_score_full_sample`, `index_base100`, `history_type`, `is_point_in_time_safe`, `source_silver_table`이다.
+
+### 7.11 `fred_latest_current_indicators`
+
+`fred_current_indicators_long`에서 series별 최신 period만 보여주는 view이다.
+
+### 7.12 `fred_current_indicator_comparison`
+
+`fred_current_indicators_long`의 공통 변환 컬럼을 `transform_type`, `transformed_value` 형태로 펼친 dashboard-friendly view이다.
+
+### 7.13 `fred_current_indicator_run_summary`
+
+`03c` 실행 단위 요약 테이블이다. source row 수, 통합 series 수, ALFRED/FRED current-only series 수, warning/outlier count를 기록한다.
 
 ## 8. Dashboard에서 주로 볼 테이블
 
@@ -312,13 +362,17 @@ Incremental Gold는 이 테이블의 `processed_at_utc`를 다음 실행의 wate
 
 | 목적 | 권장 테이블 |
 |---|---|
-| 두 개 이상 series의 증가율, z-score, 지수화 비교 | `fred_transformed_features_long` |
+| 최신 통합 대시보드의 기본 dataset | `fred_current_indicators_long` |
+| 두 개 이상 series의 증가율, z-score, 지수화 비교 | `fred_current_indicators_long` 또는 `fred_current_indicator_comparison` |
+| Strict PIT 기준 변환값 비교 | `fred_transformed_features_long` |
 | 최신 series 상태 요약 | `fred_latest_feature_snapshot` |
 | target에 대한 선행 후보 확인 | `fred_top_causal_candidates` |
 | 특정 as-of 기준 원천 관측 version 확인 | `fred_asof_observations` |
 | Gold 실행 품질/row 수 확인 | `fred_gold_run_summary`, `fred_gold_quality_report` |
 
-서로 단위가 다른 경제지표를 시각적으로 비교할 때는 `fred_transformed_features_long`에서 같은 `transform_type`만 필터링해서 보는 것이 좋다.
+최신 대시보드에서는 `fred_current_indicators_long`을 기본 dataset으로 사용한다. `pct_change_1`, `pct_change_12`, `z_score_full_sample`, `index_base100` 같은 공통 컬럼을 바로 고르면 된다. long-format filter가 편하면 `fred_current_indicator_comparison`에서 같은 `transform_type`만 필터링해서 사용한다.
+
+Strict PIT 분석에서는 기존처럼 `fred_transformed_features_long`을 사용한다.
 
 예를 들어 증가율 비교는 다음 조건을 권장한다.
 
@@ -362,6 +416,7 @@ lakehouse.source = fred
 | `fred_transformed_features_long` | `as_of_date`, `series_id`, `transform_type` |
 | `fred_series_feature_snapshot` | `as_of_date`, `series_id` |
 | `fred_causal_candidate_scores` | `as_of_date`, `target_series_id` |
+| `fred_current_indicators_long` | `target_frequency`, `series_id`, `period_start` |
 
 서버리스 또는 권한 제한 환경에서 `OPTIMIZE`가 실패할 수 있으므로 notebook은 실패 시 skip 메시지만 출력한다.
 
@@ -397,13 +452,21 @@ bronze/01a_bronze_fred_bootstrap_versions.py
 -> silver/02a_silver_fred_bootstrap_versions.py
 -> gold/03a_gold_fred_bootstrap_causal_features.py
 
+bronze/01c_bronze_fred_current_observations.py
+-> silver/02c_silver_fred_current_observations.py
+-> gold/03c_gold_fred_current_indicators.py
+
 일일 증분:
 bronze/01b_bronze_fred_incremental_versions.py
 -> silver/02b_silver_fred_incremental_versions.py
 -> gold/03b_gold_fred_incremental_causal_features.py
+
+bronze/01c_bronze_fred_current_observations.py
+-> silver/02c_silver_fred_current_observations.py
+-> gold/03c_gold_fred_current_indicators.py
 ```
 
-Gold는 Silver의 정제 결과에 의존하므로 Silver가 먼저 성공해야 한다.
+Gold는 Silver의 정제 결과에 의존하므로 Silver가 먼저 성공해야 한다. 최신 통합 대시보드는 `01c -> 02c -> 03c` 경로까지 실행되어야 FRED current-only series가 포함된다.
 
 ## 13. 해석상 주의점
 
@@ -420,7 +483,7 @@ Gold는 Silver의 정제 결과에 의존하므로 Silver가 먼저 성공해야
 
 ## 14. 요약
 
-Gold 계층은 Silver의 정제된 revision-aware 데이터를 분석과 ML에 바로 사용할 수 있는 형태로 만든다.
+Gold 계층은 Silver의 정제된 데이터를 분석, ML, 대시보드에 바로 사용할 수 있는 형태로 만든다. 현재는 strict PIT causal mart와 current integrated dashboard mart를 분리한다.
 
 | 역할 | 설명 |
 |---|---|
@@ -429,6 +492,8 @@ Gold 계층은 Silver의 정제된 revision-aware 데이터를 분석과 ML에 �
 | 공통 변환 | raw, 변화량, 증가율, 로그 차분, z-score, 기준시점 100 지수 생성 |
 | 후보 탐색 | 선택한 transform type 기준 lag correlation screening score 계산 |
 | serving table | dashboard, ML, Feature Store가 사용할 수 있는 snapshot 제공 |
+| current 통합 | ALFRED current와 FRED current-only를 `fred_current_indicators_long`으로 통합 |
+| 시각화 지원 | wide 공통 변환 컬럼과 long-format comparison view 제공 |
 | 품질 관리 | Gold rule 결과와 run summary를 append-only로 기록 |
 
 Gold는 project-specific 분석 요구가 반영되는 계층이므로, 이후 연구 질문이 구체화될수록 feature와 score 계산 방식이 확장될 수 있다.

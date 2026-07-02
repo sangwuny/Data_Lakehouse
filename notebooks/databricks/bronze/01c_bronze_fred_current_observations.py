@@ -320,7 +320,7 @@ def dedupe_rows(rows: list[dict[str, Any]], key_fields: list[str]) -> list[dict[
     return list(deduped.values())
 
 
-def merge_insert_rows(table: str, rows: list[dict[str, Any]], schema: StructType, key_fields: list[str]) -> None:
+def merge_upsert_rows(table: str, rows: list[dict[str, Any]], schema: StructType, key_fields: list[str]) -> None:
     if not rows:
         return
     rows = dedupe_rows(rows, key_fields)
@@ -328,7 +328,13 @@ def merge_insert_rows(table: str, rows: list[dict[str, Any]], schema: StructType
     view_name = f"staging_{table}_{stable_hash([BRONZE_RUN_ID, table, len(rows)])}"
     spark.createDataFrame(ordered_rows, schema=schema).createOrReplaceTempView(view_name)
 
+    update_fields = [field.name for field in schema.fields if field.name not in key_fields]
+    source_value_fields = ["value_raw", "realtime_start", "realtime_end"]
     on_clause = " AND ".join(f"target.{quote_ident(field)} <=> source.{quote_ident(field)}" for field in key_fields)
+    update_predicate = " OR ".join(
+        f"NOT (target.{quote_ident(field)} <=> source.{quote_ident(field)})" for field in source_value_fields
+    )
+    update_clause = ", ".join(f"target.{quote_ident(field)} = source.{quote_ident(field)}" for field in update_fields)
     insert_cols = ", ".join(quote_ident(field.name) for field in schema.fields)
     insert_vals = ", ".join(f"source.{quote_ident(field.name)}" for field in schema.fields)
     spark.sql(
@@ -336,10 +342,10 @@ def merge_insert_rows(table: str, rows: list[dict[str, Any]], schema: StructType
         MERGE INTO {table_name(table)} AS target
         USING {quote_ident(view_name)} AS source
         ON {on_clause}
+        WHEN MATCHED AND ({update_predicate}) THEN UPDATE SET {update_clause}
         WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})
         """
     )
-
 
 ensure_delta_table("fred_current_observations_raw", CURRENT_OBSERVATION_SCHEMA)
 
@@ -396,7 +402,7 @@ for spec in selected_specs:
             rows = []
             for response in responses:
                 rows.extend(response_to_current_rows(spec, response, collected_at))
-            merge_insert_rows("fred_current_observations_raw", rows, CURRENT_OBSERVATION_SCHEMA, CURRENT_DEDUPE_KEY_FIELDS)
+            merge_upsert_rows("fred_current_observations_raw", rows, CURRENT_OBSERVATION_SCHEMA, CURRENT_DEDUPE_KEY_FIELDS)
             active_sleep_seconds = attempt_sleep_seconds
             results.append(
                 {
@@ -465,12 +471,14 @@ display(spark.createDataFrame([summary]))
 
 # COMMAND ----------
 
+selected_series_sql = ", ".join("'" + spec["series_id"].replace("'", "''") + "'" for spec in selected_specs)
+
 display(
     spark.sql(
         f"""
         SELECT series_id, COUNT(*) AS rows
         FROM {table_name("fred_current_observations_raw")}
-        WHERE bronze_run_id = '{BRONZE_RUN_ID}'
+        WHERE series_id IN ({selected_series_sql})
         GROUP BY series_id
         ORDER BY series_id
         """
