@@ -1,499 +1,263 @@
 # Gold 계층 문서
 
-이 문서는 FRED/ALFRED 데이터 Lakehouse의 Gold 계층 설계를 설명한다. 기준 언어는 한국어이며, 현재 저장소의 Databricks notebook, Delta Lake, Unity Catalog 기반 serving mart 구조를 다룬다.
+이 문서는 현재 운영 기준의 Databricks Gold 계층을 설명한다. Gold 계층은 Silver에서 정제된 ALFRED revision-aware 데이터와 FRED current-only 데이터를 통합하여 특정 as_of_date 기준의 분석용 feature mart와 관계 후보 점수를 만든다.
 
-## 1. Gold 계층의 목적
+## 1. 목적
 
-Gold 계층은 Silver 계층의 정제된 데이터를 분석 목적에 맞게 재구성한 serving 계층이다. Bronze와 Silver가 원천 보존과 공통 정제에 초점을 둔다면, Gold는 대시보드, 리포팅, ML, causal candidate screening에 바로 사용할 수 있는 형태를 제공한다.
+Gold 계층의 목적은 다음과 같다.
 
-현재 Gold 계층의 핵심 목적은 다음과 같다.
+    1. as_of_date 시점에 관측 가능했던 데이터만 선택한다.
+    2. ALFRED revision-aware series와 FRED current-only series를 하나의 분석 mart로 통합한다.
+    3. daily, monthly, quarterly, annual, native 기준 period feature를 생성한다.
+    4. 단위가 다른 경제 지표를 비교할 수 있도록 공통 변환값을 long format으로 저장한다.
+    5. target series와 candidate series 사이의 lag별 관계 점수를 계산한다.
+    6. Databricks SQL, AI BI Dashboard, ML 분석에서 사용할 수 있는 serving table을 제공한다.
 
-```text
-1. 특정 as_of_date에 실제로 알 수 있었던 observation version만 선택한다.
-2. daily, monthly, quarterly, annual, native 기준 period feature를 만든다.
-3. 단위가 다른 경제지표를 비교할 수 있도록 공통 long-format 변환값을 생성한다.
-4. target series와 candidate series 간 lag correlation을 계산한다.
-5. ALFRED current와 FRED current-only series를 통합한 dashboard mart를 제공한다.
-6. Feature Store 또는 downstream ML에서 사용할 수 있는 snapshot table을 제공한다.
-```
+Gold는 원천 수집 계층이 아니라 분석과 서빙 계층이다. 원자료 보존은 Bronze와 Silver가 담당하고, Gold는 as-of 재현, 변환, 비교, 관계 탐색에 집중한다.
 
-Gold는 최종 인과 모델 자체가 아니라, 인과 분석과 예측 실험을 시작하기 위한 serving mart이다. 동시에 최신 지표 시각화를 위해 ALFRED current와 FRED current-only를 통합한 current indicator mart도 제공한다.
+## 2. 운영 Notebook
 
-## 2. 입력과 출력
+현재 Gold 계층의 운영 notebook은 다음 파일이다.
 
-현재 Gold 계층은 목적에 따라 입력을 나눈다.
+    notebooks/databricks/gold/03_gold_fred_asof_features.py
 
-```text
-Strict PIT / causal input : fred_lakehouse.silver.fred_observation_versions_cleaned
-Current dashboard input   : fred_lakehouse.silver.fred_observation_versions_cleaned
-                          + fred_lakehouse.silver.fred_current_observations_cleaned
-Output                    : fred_lakehouse.gold.*
-```
+입력 Silver table은 다음 두 개다.
 
-`bronze/01c`와 `silver/02c`에서 관리하는 FRED-only current data는 Gold causal feature mart에는 자동으로 합치지 않는다. 엄격한 point-in-time 분석에서는 revision-aware Silver table을 기준으로 한다. 대신 최신 대시보드와 일반 시각화는 `gold.fred_current_indicators_long`에서 ALFRED current와 FRED current-only를 통합해서 사용한다.
+    fred_lakehouse.silver.fred_observation_versions_cleaned
+    fred_lakehouse.silver.fred_current_observations_cleaned
 
-## 3. Repository 구조
+Macrotrends 또는 Yahoo Finance에서 bootstrap으로 보강된 값도 Bronze와 Silver에서 FRED current-only 구조로 정규화되므로, Gold에서는 별도 provider 분기 없이 함께 처리한다.
 
-Gold 관련 notebook은 다음 위치에 있다.
+## 3. 주요 파라미터
 
-```text
-notebooks/databricks/gold/
-  03a_gold_fred_bootstrap_causal_features.py
-  03b_gold_fred_incremental_causal_features.py
-  03c_gold_fred_current_indicators.py
-```
+| 파라미터 | 기본값 | 설명 |
+|---|---:|---|
+| catalog | fred_lakehouse | Unity Catalog 이름 |
+| silver_schema | silver | 입력 Silver schema |
+| gold_schema | gold | 출력 Gold schema |
+| as_of_date | blank | blank이면 UTC today |
+| analysis_start_date | blank | 분석 시작일. blank이면 가능한 가장 이른 period부터 사용 |
+| analysis_end_date | blank | 분석 종료일. blank이면 as_of_date |
+| series_ids | ALL | 처리할 series 목록 |
+| candidate_series_ids | ALL | 관계 후보로 볼 candidate 목록 |
+| target_series_id | GDPC1 | 관계 점수 계산의 target series |
+| target_frequency | monthly | daily, monthly, quarterly, annual, native |
+| aggregation_method | last | last 또는 mean |
+| relationship_transform_type | raw | 관계 점수에 사용할 변환값 |
+| max_lag_periods | 12 | 후보 lag 탐색 범위 |
+| min_pair_count | 24 | 관계 점수를 저장하기 위한 최소 pair 수 |
+| min_candidate_score | 0.3 | top relationship view에 표시할 최소 점수 |
+| include_quality_warnings | true | Silver warning row 포함 여부 |
+| optimize_tables | true | Delta OPTIMIZE ZORDER 실행 시도 여부 |
 
-- `03a`는 최초 전체 Gold feature mart를 구축한다.
-- 3b는 Silver 변경분을 기준으로 Gold causal mart를 증분 갱신한다.
-- 3c는 ALFRED current와 FRED current-only를 통합한 최신 dashboard mart를 만든다.
+analysis_start_date와 analysis_end_date는 변환값과 관계 점수 계산에 직접 영향을 준다. series별 시작일이 다를 때는 공통 분석 구간을 명시하는 것이 좋다. 예를 들어 NASDAQCOM처럼 관측 시작이 늦은 지표를 비교할 때는 2000-01-01 또는 2010-01-01 같은 시작일을 줄 수 있다.
 
-## 4. Gold 테이블과 뷰
+analysis_start_date가 비어 있으면 NULL로 저장된다. 관계 점수 계산에서는 null-safe join을 사용하므로 시작일을 비워도 score가 생성된다.
 
-기본 저장 위치는 다음과 같다.
+## 4. 출력 테이블과 View
 
-```text
-Catalog: fred_lakehouse
-Schema : gold
-Format : Delta table / View
-```
-
-Gold 주요 테이블과 뷰는 다음과 같다.
-
-```text
-fred_lakehouse.gold
-├── fred_asof_observations
-├── fred_period_features_long
-├── fred_transformed_features_long
-├── fred_series_feature_snapshot
-├── fred_causal_candidate_scores
-├── fred_gold_quality_report
-├── fred_gold_run_summary
-├── fred_current_indicators_long
-├── fred_current_indicator_run_summary
-├── fred_latest_feature_snapshot       (view)
-├── fred_top_causal_candidates         (view)
-├── fred_latest_current_indicators     (view)
-└── fred_current_indicator_comparison  (view)
-```
-
-## 5. 주요 파라미터
-
-공통 파라미터는 다음과 같다.
-
-```text
-catalog = fred_lakehouse
-silver_schema = silver
-gold_schema = gold
-as_of_date =                  # blank이면 UTC today
-series_ids = ALL
-candidate_series_ids = ALL
-target_series_id = GDPC1
-target_frequency = monthly
-aggregation_method = last
-causal_transform_type = raw
-max_lag_periods = 12
-min_pair_count = 24
-include_quality_warnings = true
-optimize_tables = true
-```
-
-`03c` current indicator mart는 추가로 `base_index_date`를 받을 수 있다. blank이면 series별 첫 period를 100으로 두고 `index_base100`을 계산한다.
-
-`causal_transform_type`은 causal candidate score를 어떤 값으로 계산할지 고르는 파라미터다. 기본값 `raw`는 기존처럼 period 대표값을 그대로 사용한다.
-
-지원 transform type은 다음과 같다.
-
-| Transform type | 의미 | 단위 |
+| 이름 | 유형 | 역할 |
 |---|---|---|
-| `raw` | period 대표 원값 | 원천 단위 |
-| `change_1` | 전 period 대비 변화량 | 원천 단위 또는 percentage point |
-| `change_12` | 12 period 전 대비 변화량 | 원천 단위 또는 percentage point |
-| `pct_change_1` | 전 period 대비 증가율 | percent |
-| `pct_change_12` | 12 period 전 대비 증가율 | percent |
-| `log_diff_1` | 전 period 대비 로그 차분 | log percent |
-| `log_diff_12` | 12 period 전 대비 로그 차분 | log percent |
-| `z_score_full_sample` | as-of 시점 표본 내 표준화 값 | standard deviation |
-| `index_base100` | as-of 시점 첫 period를 100으로 둔 지수 | index base 100 |
+| fred_asof_observations | Delta table | as_of_date 기준 관측 가능 row |
+| fred_period_features_long | Delta table | target frequency로 정렬된 period-level feature |
+| fred_transformed_features_long | Delta table | raw, 변화량, 증가율, z-score, 지수화 값의 long-format table |
+| fred_series_feature_snapshot | Delta table | series별 최신 period feature snapshot |
+| fred_relationship_candidate_scores | Delta table | target, candidate, lag별 관계 점수 |
+| fred_gold_quality_report | Delta table | Gold 품질 규칙 결과 |
+| fred_gold_run_summary | Delta table | Gold 실행 요약 |
+| fred_latest_feature_snapshot | View | 최신 as-of snapshot view |
+| fred_top_relationship_candidates | View | 최소 score 이상 relationship candidate view |
 
-## 6. 처리 흐름
+대시보드에서 여러 지표를 비교할 때 가장 자주 쓰는 테이블은 fred_transformed_features_long이다. target과 candidate 관계를 볼 때는 fred_relationship_candidate_scores 또는 fred_top_relationship_candidates를 사용한다.
 
-`03a`와 `03b`의 causal mart는 크게 다섯 단계로 동작한다.
+## 5. 처리 흐름
 
-```text
-1. as-of observation 선택
-2. period feature 생성
-3. transformed feature 생성
-4. latest feature snapshot 생성
-5. causal candidate score 계산
-```
+    1. as-of observation stage 생성
+    2. period feature stage 생성
+    3. transformed feature stage 생성
+    4. latest feature snapshot 생성
+    5. relationship candidate score 계산
+    6. latest view와 top relationship view 생성
+    7. quality report와 run summary 저장
+    8. Delta table property 및 OPTIMIZE 시도
 
-### 6.1 As-of observation 선택
+## 6. As-of Observation
 
-Silver table에서 특정 `as_of_date`에 실제로 볼 수 있었던 version만 선택한다.
+ALFRED revision-aware 데이터는 real-time window 기준으로 as_of_date에 실제로 볼 수 있었던 version만 선택한다.
 
-```sql
-is_point_in_time_usable
-AND value_numeric IS NOT NULL
-AND observation_date <= as_of_date
-AND realtime_start <= as_of_date
-AND realtime_end >= as_of_date
-AND coalesce(available_at, realtime_start) <= as_of_date
-```
+    is_point_in_time_usable
+    value_numeric IS NOT NULL
+    observation_date <= as_of_date
+    realtime_start <= as_of_date
+    realtime_end >= as_of_date
+    coalesce available_at realtime_start <= as_of_date
 
-동일 `series_id`, `observation_date`에 여러 version이 보이면 가장 최신 real-time version을 선택한다.
+같은 series_id와 observation_date에 여러 version이 있으면 realtime_start, available_at, observation_version_id 기준으로 가장 최신 row를 선택한다.
 
-```text
-ORDER BY realtime_start DESC, available_at DESC, observation_version_id DESC
-```
+FRED current-only 데이터는 revision-aware 재현 대상이 아니므로 observation_date가 as_of_date 이하인 row를 포함한다. Gold 결과에는 history_type, availability_basis, is_revision_aware 컬럼이 있어 revision-aware row와 current-only row를 구분할 수 있다.
 
-결과는 `fred_asof_observations`에 저장된다.
+## 7. Period Feature
 
-### 6.2 Period feature 생성
+period feature는 target_frequency와 aggregation_method에 따라 생성된다.
 
-As-of observation을 target frequency 기준으로 정렬하고 집계한다.
+    지원 frequency: daily, monthly, quarterly, annual, native
+    지원 aggregation: last, mean
 
-지원 frequency는 다음과 같다.
+analysis_start_date와 analysis_end_date가 지정되면 해당 구간 안의 period_start만 이후 변환과 관계 점수 계산에 사용된다.
 
-```text
-daily, monthly, quarterly, annual, native
-```
+## 8. Transformed Feature
 
-지원 aggregation method는 다음과 같다.
+fred_transformed_features_long은 단위가 다른 경제 지표를 같은 방식으로 비교하기 위한 핵심 테이블이다.
 
-```text
-last, mean
-```
+| transform_type | 의미 | 단위 |
+|---|---|---|
+| raw | period 대표값 | 원천 단위 |
+| change_1 | 1 period 전 대비 변화량 | 원천 단위 또는 percentage point |
+| change_12 | 12 period 전 대비 변화량 | 원천 단위 또는 percentage point |
+| pct_change_1 | 1 period 전 대비 증가율 | percent |
+| pct_change_12 | 12 period 전 대비 증가율 | percent |
+| log_diff_1 | 1 period 로그 차분 | log percent |
+| log_diff_12 | 12 period 로그 차분 | log percent |
+| z_score_full_sample | 선택된 분석 구간 내 full-sample z-score | standard deviation |
+| index_base100 | 선택된 분석 구간의 첫 period를 100으로 둔 지수 | index base 100 |
 
-period별로 `mean`, `min`, `max`, `last`, 품질 warning 수, outlier 수, revision 수, 마지막 observation lineage를 계산한다.
+권장 사용 방식은 다음과 같다.
 
-결과는 `fred_period_features_long`에 저장된다.
+    수준값 비교: raw, index_base100
+    증가율 비교: pct_change_1, pct_change_12, log_diff_1, log_diff_12
+    금리와 실업률 변화 비교: change_1, change_12
+    한 그래프 스케일 비교: z_score_full_sample
 
-### 6.3 Transformed feature 생성
+z_score_full_sample과 index_base100은 선택된 분석 구간을 기준으로 계산된다. 따라서 analysis_start_date를 바꾸면 값도 바뀐다.
 
-`fred_period_features_long`의 `value_numeric`을 기반으로 분석 목적별 변환값을 만든다.
+## 9. Feature Snapshot
 
-이 테이블은 서로 단위가 다른 경제지표를 함께 비교하기 위한 핵심 long-format table이다.
+fred_series_feature_snapshot은 각 series의 최신 period만 뽑아 feature snapshot으로 저장한다.
 
-```text
-series_id | period_start | transform_type | transformed_value | transformed_unit
-```
+주요 feature는 다음과 같다.
 
-예를 들어 같은 `series_id = CPIAUCSL`이라도 다음 row들이 함께 존재할 수 있다.
+    value_numeric
+    lag_1_value_numeric
+    lag_3_value_numeric
+    lag_6_value_numeric
+    lag_12_value_numeric
+    diff_1_value_numeric
+    pct_change_1
+    rolling_mean_3
+    rolling_mean_6
+    rolling_mean_12
+    rolling_stddev_12
 
-```text
-raw
-pct_change_1
-pct_change_12
-z_score_full_sample
-index_base100
-```
+## 10. Relationship Candidate Scores
 
-결과는 `fred_transformed_features_long`에 저장된다.
-
-### 6.4 Feature snapshot 생성
-
-각 `as_of_date`, target frequency, aggregation method, series별 최신 period feature를 snapshot 형태로 만든다.
-
-생성되는 대표 feature는 다음과 같다.
-
-| Feature | 설명 |
-|---|---|
-| `value_numeric` | 최신 period의 대표 값 |
-| `lag_1_value_numeric` | 1 period lag |
-| `lag_3_value_numeric` | 3 period lag |
-| `lag_6_value_numeric` | 6 period lag |
-| `lag_12_value_numeric` | 12 period lag |
-| `diff_1_value_numeric` | 현재 값과 1 period lag의 차이 |
-| `pct_change_1` | 1 period percentage change |
-| `rolling_mean_3` | 최근 3 period 평균 |
-| `rolling_mean_6` | 최근 6 period 평균 |
-| `rolling_mean_12` | 최근 12 period 평균 |
-| `rolling_stddev_12` | 최근 12 period 표준편차 |
-
-결과는 `fred_series_feature_snapshot`에 저장된다. 이 테이블은 Feature Store 또는 dashboard summary에 쓰기 좋다.
-
-### 6.5 Causal candidate score 계산
-
-Gold는 target series와 candidate series를 target frequency 기준으로 정렬한 뒤 lag별 correlation을 계산한다.
-
-중요한 점은 candidate score가 이제 `value_numeric`만이 아니라 `causal_transform_type`으로 선택된 `transformed_value`를 기준으로 계산된다는 것이다.
-
-```text
-causal_transform_type = raw            # 원값 기준
-causal_transform_type = pct_change_12  # 전년동기 대비 증가율 기준
-causal_transform_type = z_score_full_sample
-```
+관계 후보 점수는 target series와 candidate series를 같은 relationship_transform_type 기준으로 맞춘 뒤 lag별 Pearson correlation을 계산한다.
 
 계산 흐름은 다음과 같다.
 
-```text
-1. target series의 transform_type별 period 값을 선택한다.
-2. lag_periods = 0 .. max_lag_periods를 생성한다.
-3. candidate series를 lag만큼 과거로 이동해 target period와 맞춘다.
-4. pair_count와 pearson correlation을 계산한다.
-5. coverage_rate와 candidate_score를 계산한다.
-6. score 기준으로 candidate_rank를 부여한다.
-```
+    1. target_series_id의 transformed_value를 선택한다.
+    2. lag_periods = 0 .. max_lag_periods를 생성한다.
+    3. candidate period를 lag만큼 과거로 이동해 target period와 맞춘다.
+    4. target_value_numeric, candidate_value_numeric이 모두 null이 아닌 pair만 사용한다.
+    5. pair_count >= min_pair_count인 후보만 저장한다.
+    6. pearson_corr, r_squared, coverage_rate, candidate_score를 계산한다.
 
-현재 score는 다음 개념을 사용한다.
+현재 점수 공식은 다음과 같다.
 
-```text
-candidate_score = abs(pearson_corr) * coverage_rate
-coverage_rate   = pair_count / target_period_count
-```
+    r_squared       = pearson_corr squared
+    coverage_rate   = pair_count / target_period_count
+    candidate_score = r_squared * coverage_rate
 
-결과는 `fred_causal_candidate_scores`에 저장된다. 이 점수는 인과성을 증명하는 결과가 아니라, 추가 검토할 후보를 줄여주는 screening signal이다.
-### 6.6 Current indicator mart 생성
+candidate_score만 보지 말고 r_squared, coverage_rate, pair_count, target_period_count를 함께 봐야 한다. coverage_rate는 데이터 겹침 정도를 반영하므로, 시작 시점이 늦은 지표는 score가 낮게 보일 수 있다. 이런 경우 analysis_start_date로 공통 분석 구간을 맞추는 것이 좋다.
 
-`03c`는 최신 시각화용 mart를 만든다. 이 경로는 strict point-in-time 재현 목적이 아니라 dashboard와 일반 분석 목적이다.
+fred_top_relationship_candidates view는 candidate_score >= min_candidate_score 조건을 만족하는 최신 후보를 보여준다.
 
-```text
-silver.fred_observation_versions_cleaned   # ALFRED current rows
-+ silver.fred_current_observations_cleaned # FRED current-only rows
--> gold.fred_current_indicators_long
-```
+## 11. 테이블 Key
 
-`fred_current_indicators_long`은 period별 대표값과 함께 다음 공통 변환 컬럼을 wide column으로 제공한다.
-
-```text
-value_numeric, change_1, change_12, pct_change_1, pct_change_12,
-log_diff_1, log_diff_12, z_score_full_sample, index_base100
-```
-
-`fred_current_indicator_comparison` view는 같은 값을 `transform_type`, `transformed_value` long-format으로 펼쳐서 dashboard filter에 쓰기 좋게 만든다.
-
-## 7. 테이블별 역할과 key
-
-### 7.1 `fred_asof_observations`
-
-특정 `as_of_date`에 볼 수 있었던 observation version만 저장한다.
-
-```text
-Key: as_of_date, series_id, observation_date
-```
-
-### 7.2 `fred_period_features_long`
-
-As-of observation을 target frequency와 aggregation method 기준으로 정렬한 period-level feature table이다.
-
-```text
-Key: as_of_date, target_frequency, aggregation_method, series_id, period_start
-```
-
-### 7.3 `fred_transformed_features_long`
-
-분석 목적별 변환값을 long-format으로 저장한다. 서로 단위가 다른 series를 비교하거나 dashboard에서 여러 series를 겹쳐 볼 때 가장 중요하다.
-
-```text
-Key: as_of_date, target_frequency, aggregation_method, series_id, period_start, transform_type
-```
-
-주요 컬럼은 다음과 같다.
-
-| Column | 의미 |
+| 테이블 | Merge key |
 |---|---|
-| `transform_type` | 변환 종류 |
-| `transformed_value` | 변환된 분석용 값 |
-| `transformed_unit` | 변환 후 단위 |
-| `base_value_numeric` | 변환 전 period 대표값 |
-| `comparison_lag_periods` | 비교 기준 lag |
-| `lookback_periods` | 계산에 사용한 lookback period |
-| `calculation_method` | 계산 방식 설명 |
+| fred_asof_observations | as_of_date, series_id, observation_date |
+| fred_period_features_long | as_of_date, target_frequency, aggregation_method, series_id, period_start |
+| fred_transformed_features_long | as_of_date, target_frequency, aggregation_method, series_id, period_start, transform_type |
+| fred_series_feature_snapshot | as_of_date, target_frequency, aggregation_method, series_id |
+| fred_relationship_candidate_scores | as_of_date, analysis_start_date, analysis_end_date, target_frequency, aggregation_method, transform_type, target_series_id, candidate_series_id, lag_periods |
 
-### 7.4 `fred_series_feature_snapshot`
+현재 notebook은 실행 시 같은 as_of_date, target_frequency, aggregation_method, series_id 범위의 period, transformed, snapshot row를 삭제 후 다시 merge한다. 따라서 여러 analysis_start_date 조합을 동시에 장기 보존하는 용도로는 아직 완전히 분리되어 있지 않다. 분석 구간별 결과를 장기 보존하려면 delete 조건과 merge key를 더 확장하는 개선이 필요하다.
 
-각 series별 최신 feature snapshot이다.
+## 12. 품질 리포트와 실행 요약
 
-```text
-Key: as_of_date, target_frequency, aggregation_method, series_id
-```
+fred_gold_quality_report는 다음 규칙 결과를 기록한다.
 
-### 7.5 `fred_causal_candidate_scores`
+    asof_not_before_observation
+    visible_inside_realtime_window
+    period_feature_value_not_null
+    candidate_scores_meet_min_pair_count
 
-target series와 candidate series 간 transform type, lag별 screening score를 저장한다.
+fred_gold_run_summary는 실행 단위로 다음 정보를 기록한다.
 
-```text
-Key: as_of_date, target_frequency, aggregation_method, transform_type,
-     target_series_id, candidate_series_id, lag_periods
-```
+    gold_run_id
+    as_of_date
+    analysis_start_date
+    analysis_end_date
+    target_frequency
+    aggregation_method
+    relationship_transform_type
+    target_series_id
+    processing_series_count
+    asof_observation_count
+    period_feature_count
+    transformed_feature_count
+    feature_snapshot_count
+    relationship_candidate_score_count
+    failed_quality_rule_count
 
-### 7.6 `fred_gold_quality_report`
+## 13. Dashboard 권장 사용
 
-Gold run 단위 품질 검증 결과를 append-only로 기록한다.
-
-### 7.7 `fred_gold_run_summary`
-
-Gold run 단위 요약 테이블이다. `causal_transform_type`, 처리 mode, target frequency, target series, row 수, quality rule 실패 수 등을 기록한다.
-
-Incremental Gold는 이 테이블의 `processed_at_utc`를 다음 실행의 watermark로 사용한다.
-
-### 7.8 `fred_latest_feature_snapshot`
-
-`fred_series_feature_snapshot`에서 frequency, aggregation method, series별 최신 as-of row만 보여주는 view이다.
-
-### 7.9 `fred_top_causal_candidates`
-
-`fred_causal_candidate_scores`에서 최신 as-of 기준 상위 candidate만 보여주는 view이다. 현재 `candidate_rank <= 20` 조건을 사용한다.
-### 7.10 `fred_current_indicators_long`
-
-최종 통합 시각화의 기본 테이블이다. ALFRED current row와 FRED current-only row를 같은 schema로 맞춘 뒤 target frequency 기준으로 집계한다.
-
-```text
-Key: target_frequency, aggregation_method, series_id, period_start
-```
-
-주요 컬럼은 `value_numeric`, `pct_change_1`, `pct_change_12`, `z_score_full_sample`, `index_base100`, `history_type`, `is_point_in_time_safe`, `source_silver_table`이다.
-
-### 7.11 `fred_latest_current_indicators`
-
-`fred_current_indicators_long`에서 series별 최신 period만 보여주는 view이다.
-
-### 7.12 `fred_current_indicator_comparison`
-
-`fred_current_indicators_long`의 공통 변환 컬럼을 `transform_type`, `transformed_value` 형태로 펼친 dashboard-friendly view이다.
-
-### 7.13 `fred_current_indicator_run_summary`
-
-`03c` 실행 단위 요약 테이블이다. source row 수, 통합 series 수, ALFRED/FRED current-only series 수, warning/outlier count를 기록한다.
-
-## 8. Dashboard에서 주로 볼 테이블
-
-대시보드 목적별 권장 테이블은 다음과 같다.
-
-| 목적 | 권장 테이블 |
+| 목적 | 권장 테이블 또는 View |
 |---|---|
-| 최신 통합 대시보드의 기본 dataset | `fred_current_indicators_long` |
-| 두 개 이상 series의 증가율, z-score, 지수화 비교 | `fred_current_indicators_long` 또는 `fred_current_indicator_comparison` |
-| Strict PIT 기준 변환값 비교 | `fred_transformed_features_long` |
-| 최신 series 상태 요약 | `fred_latest_feature_snapshot` |
-| target에 대한 선행 후보 확인 | `fred_top_causal_candidates` |
-| 특정 as-of 기준 원천 관측 version 확인 | `fred_asof_observations` |
-| Gold 실행 품질/row 수 확인 | `fred_gold_run_summary`, `fred_gold_quality_report` |
+| 여러 series의 raw, 증가율, z-score 비교 | fred_transformed_features_long |
+| 최신 series 상태 요약 | fred_latest_feature_snapshot |
+| target과 관계가 높은 후보 확인 | fred_relationship_candidate_scores |
+| score threshold가 적용된 후보 확인 | fred_top_relationship_candidates |
+| as-of 기준 원천 관측 row 확인 | fred_asof_observations |
+| 실행 품질과 row 수 확인 | fred_gold_run_summary, fred_gold_quality_report |
 
-최신 대시보드에서는 `fred_current_indicators_long`을 기본 dataset으로 사용한다. `pct_change_1`, `pct_change_12`, `z_score_full_sample`, `index_base100` 같은 공통 컬럼을 바로 고르면 된다. long-format filter가 편하면 `fred_current_indicator_comparison`에서 같은 `transform_type`만 필터링해서 사용한다.
+서로 단위가 다른 지표를 비교할 때는 raw를 바로 겹쳐 그리기보다 pct_change_1, pct_change_12, log_diff_1, log_diff_12, z_score_full_sample, index_base100 중 목적에 맞는 transform_type을 선택하는 것이 좋다.
 
-Strict PIT 분석에서는 기존처럼 `fred_transformed_features_long`을 사용한다.
+## 14. 운영 권장값
 
-예를 들어 증가율 비교는 다음 조건을 권장한다.
+일반적인 월별 비교는 다음 설정을 권장한다.
 
-```sql
-WHERE transform_type IN ('pct_change_1', 'pct_change_12')
-```
+    target_frequency = monthly
+    aggregation_method = last
+    relationship_transform_type = raw
+    max_lag_periods = 12
+    min_pair_count = 24
+    min_candidate_score = 0.3
+    include_quality_warnings = true
 
-## 9. Incremental 처리 원칙
+주가지수와 거시지표 비교는 다음처럼 공통 분석 구간을 지정하는 것이 좋다.
 
-Gold incremental은 Silver 변경량과 현재 transform score 존재 여부에 따라 재계산 범위를 조절한다.
+    target_series_id = NASDAQCOM 또는 SP500
+    analysis_start_date = 2000-01-01 또는 2010-01-01
+    target_frequency = monthly
+    relationship_transform_type = pct_change_1 또는 pct_change_12
+    min_pair_count = 24
 
-| 상황 | 처리 방식 |
-|---|---|
-| 이전 Gold watermark 없음 | bootstrap처럼 전체 selected series 처리 |
-| target series 변경 | 전체 candidate 재계산 |
-| candidate만 변경 | 변경 candidate와 target만 재계산 |
-| as-of snapshot 없음 + 보강 옵션 true | complete as-of snapshot 생성 |
-| 선택한 `causal_transform_type`의 score 없음 | 전체 selected series 처리 |
-| Silver 변경 없음 | notebook exit |
+데이터 시작 시점이 서로 크게 다르면 analysis_start_date를 명시해 공통 비교 구간을 잡아야 한다. 그렇지 않으면 coverage_rate가 낮아져 실제 상관관계가 있어도 candidate_score가 낮게 나올 수 있다.
 
-Gold는 각 대상 범위의 기존 row를 먼저 삭제한 뒤 `MERGE`한다. 따라서 같은 as-of date와 같은 파라미터로 재실행해도 결과가 중복되지 않는다.
+## 15. 해석 주의사항
 
-## 10. 품질과 최적화
+fred_relationship_candidate_scores는 인과관계를 증명하는 테이블이 아니다. target과 candidate 사이의 lag별 선형 관계를 빠르게 탐색하기 위한 screening 결과다.
 
-Gold table에는 가능한 경우 다음 Delta table properties를 적용한다.
+해석 시 반드시 함께 확인할 값은 다음과 같다.
 
-```text
-delta.enableChangeDataFeed = true
-delta.autoOptimize.optimizeWrite = true
-delta.autoOptimize.autoCompact = true
-lakehouse.layer = gold
-lakehouse.source = fred
-```
+    r_squared
+    coverage_rate
+    pair_count
+    target_period_count
+    lag_periods
+    transform_type
+    quality_warning_count
+    outlier_count
 
-`optimize_tables = true`이면 주요 table에 대해 `OPTIMIZE ... ZORDER BY`를 시도한다.
-
-| 테이블 | ZORDER 기준 |
-|---|---|
-| `fred_asof_observations` | `as_of_date`, `series_id` |
-| `fred_period_features_long` | `as_of_date`, `series_id` |
-| `fred_transformed_features_long` | `as_of_date`, `series_id`, `transform_type` |
-| `fred_series_feature_snapshot` | `as_of_date`, `series_id` |
-| `fred_causal_candidate_scores` | `as_of_date`, `target_series_id` |
-| `fred_current_indicators_long` | `target_frequency`, `series_id`, `period_start` |
-
-서버리스 또는 권한 제한 환경에서 `OPTIMIZE`가 실패할 수 있으므로 notebook은 실패 시 skip 메시지만 출력한다.
-
-## 11. 운영 파라미터 권장값
-
-현재 20개 seed catalog 기준으로 실질 GDP를 target으로 삼는다면 다음 설정을 권장한다.
-
-```text
-target_series_id = GDPC1
-target_frequency = monthly
-aggregation_method = last
-causal_transform_type = raw
-max_lag_periods = 12
-min_pair_count = 24
-include_quality_warnings = true
-```
-
-단위가 다른 지표 간 변동률 관계를 보고 싶다면 다음도 자주 쓸 수 있다.
-
-```text
-causal_transform_type = pct_change_12
-```
-
-분기 GDP를 target으로 직접 맞추고 싶다면 `target_frequency = quarterly`도 가능하다. 다만 다른 월별/일별 candidate와의 정렬 방식이 달라지므로 해석에 주의해야 한다.
-
-## 12. 운영 순서
-
-권장 실행 순서는 다음과 같다.
-
-```text
-초기 구축:
-bronze/01a_bronze_fred_bootstrap_versions.py
--> silver/02a_silver_fred_bootstrap_versions.py
--> gold/03a_gold_fred_bootstrap_causal_features.py
-
-bronze/01c_bronze_fred_current_observations.py
--> silver/02c_silver_fred_current_observations.py
--> gold/03c_gold_fred_current_indicators.py
-
-일일 증분:
-bronze/01b_bronze_fred_incremental_versions.py
--> silver/02b_silver_fred_incremental_versions.py
--> gold/03b_gold_fred_incremental_causal_features.py
-
-bronze/01c_bronze_fred_current_observations.py
--> silver/02c_silver_fred_current_observations.py
--> gold/03c_gold_fred_current_indicators.py
-```
-
-Gold는 Silver의 정제 결과에 의존하므로 Silver가 먼저 성공해야 한다. 최신 통합 대시보드는 `01c -> 02c -> 03c` 경로까지 실행되어야 FRED current-only series가 포함된다.
-
-## 13. 해석상 주의점
-
-`fred_causal_candidate_scores`의 correlation 기반 score는 인과관계를 확정하지 않는다. 이 값은 다음 질문을 빠르게 좁히는 screening 결과로 보는 것이 안전하다.
-
-```text
-어떤 candidate series가 target series보다 몇 period 앞서 움직이는 경향이 있는가?
-그 관계가 충분한 관측 pair에서 반복되는가?
-품질 warning이나 outlier가 score를 왜곡하고 있지는 않은가?
-원값 기준 관계와 증가율 기준 관계가 서로 일관적인가?
-```
-
-최종 인과 판단은 추가적인 경제 이론, 시차 구조 검토, backtesting, causal model, robustness check를 거쳐야 한다.
-
-## 14. 요약
-
-Gold 계층은 Silver의 정제된 데이터를 분석, ML, 대시보드에 바로 사용할 수 있는 형태로 만든다. 현재는 strict PIT causal mart와 current integrated dashboard mart를 분리한다.
-
-| 역할 | 설명 |
-|---|---|
-| as-of 복원 | 특정 시점에 실제로 볼 수 있었던 observation version 선택 |
-| 기간 정렬 | daily, monthly, quarterly, annual, native 기준 period feature 생성 |
-| 공통 변환 | raw, 변화량, 증가율, 로그 차분, z-score, 기준시점 100 지수 생성 |
-| 후보 탐색 | 선택한 transform type 기준 lag correlation screening score 계산 |
-| serving table | dashboard, ML, Feature Store가 사용할 수 있는 snapshot 제공 |
-| current 통합 | ALFRED current와 FRED current-only를 `fred_current_indicators_long`으로 통합 |
-| 시각화 지원 | wide 공통 변환 컬럼과 long-format comparison view 제공 |
-| 품질 관리 | Gold rule 결과와 run summary를 append-only로 기록 |
-
-Gold는 project-specific 분석 요구가 반영되는 계층이므로, 이후 연구 질문이 구체화될수록 feature와 score 계산 방식이 확장될 수 있다.
+특히 pair_count가 작거나 coverage_rate가 낮거나 target과 candidate의 관측 시작 시점이 크게 다르면 점수 해석에 주의해야 한다. 최종 판단에는 경제 이론, 시차 구조 검토, out-of-sample backtest, robustness check가 필요하다.

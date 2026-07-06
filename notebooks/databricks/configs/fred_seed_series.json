@@ -258,5 +258,15 @@
     "description": "NASDAQ Composite",
     "role": "기술주 중심 주가지수 / 예측 대상 후보",
     "alfred_available": false
+  },
+  {
+    "rank": 27,
+    "series_id": "BOGZ1FL663067003Q",
+    "domain": "leverage",
+    "priority": "core",
+    "expected_frequency": "quarterly",
+    "description": "Security Brokers and Dealers; Receivables Due from Customers (Margin Loans and Other Receivables); Asset, Level",
+    "role": "브로커·딜러 고객채권 / margin loan proxy",
+    "alfred_available": true
   }
 ]
