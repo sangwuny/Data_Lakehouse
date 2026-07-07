@@ -1,8 +1,8 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # 03a Gold FRED Bootstrap Causal Feature Mart
+# MAGIC # 03 Gold FRED/ALFRED As-Of Feature Mart
 # MAGIC
-# MAGIC Initial full Gold serving layer build for revision-aware FRED/ALFRED time series.
+# MAGIC Single as-of-date Gold layer build for integrated ALFRED revision-aware and FRED current-only indicators.
 # MAGIC
 # MAGIC This notebook uses Databricks-native building blocks as much as possible:
 # MAGIC
@@ -12,13 +12,13 @@
 # MAGIC - Delta table properties for Change Data Feed and write optimization.
 # MAGIC - A Feature Store-compatible snapshot table keyed by `series_id` and `as_of_date`.
 # MAGIC
-# MAGIC Recommended one-time bootstrap operation:
+# MAGIC Recommended operation:
 # MAGIC
 # MAGIC ```text
 # MAGIC Lakeflow Job:
-# MAGIC   01a Bronze bootstrap
-# MAGIC   -> 02a Silver bootstrap
-# MAGIC   -> 03a Gold bootstrap causal feature mart
+# MAGIC   01a/01b Bronze ALFRED + 01c Bronze FRED current
+# MAGIC   -> 02a/02b Silver ALFRED + 02c Silver FRED current
+# MAGIC   -> 03 Gold as-of feature mart
 # MAGIC ```
 
 # COMMAND ----------
@@ -31,14 +31,17 @@ dbutils.widgets.text("catalog", "fred_lakehouse", "Catalog")
 dbutils.widgets.text("silver_schema", "silver", "Silver schema")
 dbutils.widgets.text("gold_schema", "gold", "Gold schema")
 dbutils.widgets.text("as_of_date", "", "As-of date, blank = UTC today")
+dbutils.widgets.text("analysis_start_date", "", "Analysis start date, blank = earliest available")
+dbutils.widgets.text("analysis_end_date", "", "Analysis end date, blank = as-of date")
 dbutils.widgets.text("series_ids", "ALL", "Series IDs: GDPC1,UNRATE or ALL")
 dbutils.widgets.text("candidate_series_ids", "ALL", "Candidate series IDs: ALL or comma list")
 dbutils.widgets.text("target_series_id", "GDPC1", "Target series ID for candidate screening")
 dbutils.widgets.dropdown("target_frequency", "monthly", ["daily", "monthly", "quarterly", "annual", "native"], "Target frequency")
 dbutils.widgets.dropdown("aggregation_method", "last", ["last", "mean"], "Period aggregation")
-dbutils.widgets.dropdown("causal_transform_type", "raw", ["raw", "change_1", "change_12", "pct_change_1", "pct_change_12", "log_diff_1", "log_diff_12", "z_score_full_sample", "index_base100"], "Transform used for candidate scoring")
+dbutils.widgets.dropdown("relationship_transform_type", "raw", ["raw", "change_1", "change_12", "pct_change_1", "pct_change_12", "log_diff_1", "log_diff_12", "z_score_full_sample", "index_base100"], "Transform used for relationship scoring")
 dbutils.widgets.text("max_lag_periods", "12", "Max candidate lag periods")
 dbutils.widgets.text("min_pair_count", "24", "Minimum aligned target/candidate pairs")
+dbutils.widgets.text("min_candidate_score", "0.3", "Minimum candidate score for top relationship view")
 dbutils.widgets.dropdown("include_quality_warnings", "true", ["true", "false"], "Include Silver warning rows")
 dbutils.widgets.dropdown("optimize_tables", "true", ["true", "false"], "Run OPTIMIZE when available")
 
@@ -46,25 +49,47 @@ CATALOG = dbutils.widgets.get("catalog").strip()
 SILVER_SCHEMA = dbutils.widgets.get("silver_schema").strip()
 GOLD_SCHEMA = dbutils.widgets.get("gold_schema").strip()
 REQUESTED_AS_OF_DATE = dbutils.widgets.get("as_of_date").strip() or None
-LOAD_TYPE = "bootstrap"
-MATERIALIZE_COMPLETE_ASOF_SNAPSHOT = True
+REQUESTED_ANALYSIS_START_DATE = dbutils.widgets.get("analysis_start_date").strip() or None
+REQUESTED_ANALYSIS_END_DATE = dbutils.widgets.get("analysis_end_date").strip() or None
+LOAD_TYPE = "as_of"
 SERIES_IDS_PARAM = dbutils.widgets.get("series_ids").strip()
 CANDIDATE_SERIES_IDS_PARAM = dbutils.widgets.get("candidate_series_ids").strip()
 TARGET_SERIES_ID = dbutils.widgets.get("target_series_id").strip().upper()
 TARGET_FREQUENCY = dbutils.widgets.get("target_frequency").strip().lower()
 AGGREGATION_METHOD = dbutils.widgets.get("aggregation_method").strip().lower()
-CAUSAL_TRANSFORM_TYPE = dbutils.widgets.get("causal_transform_type").strip().lower()
+RELATIONSHIP_TRANSFORM_TYPE = dbutils.widgets.get("relationship_transform_type").strip().lower()
 MAX_LAG_PERIODS = int(dbutils.widgets.get("max_lag_periods"))
 MIN_PAIR_COUNT = int(dbutils.widgets.get("min_pair_count"))
+MIN_CANDIDATE_SCORE = float(dbutils.widgets.get("min_candidate_score"))
 INCLUDE_QUALITY_WARNINGS = dbutils.widgets.get("include_quality_warnings").strip().lower() == "true"
 OPTIMIZE_TABLES = dbutils.widgets.get("optimize_tables").strip().lower() == "true"
 
 GOLD_RUN_ID = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 GOLD_PROCESSED_AT_UTC = datetime.now(timezone.utc).isoformat()
 AS_OF_DATE = REQUESTED_AS_OF_DATE or datetime.now(timezone.utc).date().isoformat()
+ANALYSIS_START_DATE = REQUESTED_ANALYSIS_START_DATE
+ANALYSIS_END_DATE = REQUESTED_ANALYSIS_END_DATE or AS_OF_DATE
 
-TRANSFORM_NAME = "build_fred_gold_bootstrap_causal_feature_mart"
-TRANSFORM_VERSION = "0.3.0-bootstrap"
+def validate_iso_date(name: str, value: str | None) -> None:
+    if value is None:
+        return
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"{name} must be formatted as YYYY-MM-DD: {value}") from exc
+
+validate_iso_date("as_of_date", AS_OF_DATE)
+validate_iso_date("analysis_start_date", ANALYSIS_START_DATE)
+validate_iso_date("analysis_end_date", ANALYSIS_END_DATE)
+
+if ANALYSIS_START_DATE is not None and ANALYSIS_START_DATE > ANALYSIS_END_DATE:
+    raise ValueError("analysis_start_date must be less than or equal to analysis_end_date")
+
+if ANALYSIS_END_DATE > AS_OF_DATE:
+    raise ValueError("analysis_end_date must be less than or equal to as_of_date")
+
+TRANSFORM_NAME = "build_fred_gold_asof_feature_mart"
+TRANSFORM_VERSION = "1.0.0-asof-integrated"
 
 SUPPORTED_TRANSFORM_TYPES = {
     "raw",
@@ -92,6 +117,12 @@ def sql_literal(value: object) -> str:
 
 def comma_sql_literals(values: list[str]) -> str:
     return ", ".join(sql_literal(value) for value in values)
+
+
+def sql_date_expr(value: str | None) -> str:
+    if value is None:
+        return "CAST(NULL AS DATE)"
+    return f"DATE {sql_literal(value)}"
 
 
 def normalize_id_list(value: str) -> list[str]:
@@ -209,7 +240,9 @@ spark.sql(f"USE SCHEMA {quote_ident(GOLD_SCHEMA)}")
 # Schema evolution is handled through writer options where append writes need it.
 
 if not table_exists(f"{CATALOG}.{SILVER_SCHEMA}.fred_observation_versions_cleaned"):
-    raise ValueError("Silver table was not found. Run 02a/02b Silver versioned cleaning first.")
+    raise ValueError("Silver ALFRED table was not found. Run 02a/02b Silver versioned cleaning first.")
+if not table_exists(f"{CATALOG}.{SILVER_SCHEMA}.fred_current_observations_cleaned"):
+    raise ValueError("Silver FRED current table was not found. Run 01c Bronze and 02c Silver current first.")
 
 if TARGET_FREQUENCY not in {"daily", "monthly", "quarterly", "annual", "native"}:
     raise ValueError(f"Unsupported target_frequency: {TARGET_FREQUENCY}")
@@ -217,11 +250,13 @@ if TARGET_FREQUENCY not in {"daily", "monthly", "quarterly", "annual", "native"}
 if AGGREGATION_METHOD not in {"last", "mean"}:
     raise ValueError(f"Unsupported aggregation_method: {AGGREGATION_METHOD}")
 
-if CAUSAL_TRANSFORM_TYPE not in SUPPORTED_TRANSFORM_TYPES:
-    raise ValueError(f"Unsupported causal_transform_type: {CAUSAL_TRANSFORM_TYPE}")
+if RELATIONSHIP_TRANSFORM_TYPE not in SUPPORTED_TRANSFORM_TYPES:
+    raise ValueError(f"Unsupported relationship_transform_type: {RELATIONSHIP_TRANSFORM_TYPE}")
 
 selected_series = normalize_id_list(SERIES_IDS_PARAM)
 candidate_series = normalize_id_list(CANDIDATE_SERIES_IDS_PARAM)
+if selected_series:
+    selected_series = sorted(set(selected_series + [TARGET_SERIES_ID] + candidate_series))
 
 selected_series_base_predicate = "1 = 1" if not selected_series else f"upper(series_id) IN ({comma_sql_literals(selected_series)})"
 quality_predicate = "quality_status <> 'error'" if INCLUDE_QUALITY_WARNINGS else "quality_status = 'valid'"
@@ -231,11 +266,19 @@ def collect_series_ids(predicate: str) -> list[str]:
         row["series_id"]
         for row in spark.sql(
             f"""
-            SELECT DISTINCT upper(series_id) AS series_id
-            FROM {silver_table("fred_observation_versions_cleaned")}
-            WHERE is_point_in_time_usable
-              AND value_numeric IS NOT NULL
-              AND {predicate}
+            SELECT DISTINCT series_id
+            FROM (
+                SELECT DISTINCT upper(series_id) AS series_id
+                FROM {silver_table("fred_observation_versions_cleaned")}
+                WHERE is_point_in_time_usable
+                  AND value_numeric IS NOT NULL
+                  AND {predicate}
+                UNION
+                SELECT DISTINCT upper(series_id) AS series_id
+                FROM {silver_table("fred_current_observations_cleaned")}
+                WHERE value_numeric IS NOT NULL
+                  AND {predicate}
+            ) series_union
             ORDER BY series_id
             """
         ).collect()
@@ -249,17 +292,13 @@ all_selected_series = sorted(set(all_selected_series))
 if TARGET_SERIES_ID not in all_selected_series:
     raise ValueError(
         f"Target series {TARGET_SERIES_ID} was not found in Silver cleaned observations. "
-        "Use a series_id present in fred_observation_versions_cleaned, for example GDPC1."
+        "Use a series_id present in ALFRED or FRED current Silver tables, for example GDPC1 or SP500."
     )
 
-previous_gold_processed_at_utc = None
-changed_silver_row_count = 0
-affected_series = []
-incremental_change_mode = "bootstrap_all_selected_series"
 processing_series = all_selected_series
 
 if not processing_series:
-    message = "No selected Silver rows found for Gold bootstrap feature mart."
+    message = "No selected Silver rows found for Gold as-of feature mart."
     print(message)
     dbutils.notebook.exit(message)
 
@@ -268,19 +307,20 @@ processing_series_delete_predicate = f"upper(series_id) IN ({comma_sql_literals(
 scoring_candidate_series = [] if not candidate_series else candidate_series
 candidate_scoring_predicate = "1 = 1" if not candidate_series else f"upper(candidate.series_id) IN ({comma_sql_literals(candidate_series)})"
 candidate_delete_predicate = "1 = 1" if not candidate_series else f"upper(candidate_series_id) IN ({comma_sql_literals(candidate_series)})"
+analysis_start_filter = "" if ANALYSIS_START_DATE is None else f"AND period_start >= {sql_date_expr(ANALYSIS_START_DATE)}"
+analysis_end_filter = f"AND period_start <= {sql_date_expr(ANALYSIS_END_DATE)}"
 print(f"Gold target schema: {CATALOG}.{GOLD_SCHEMA}")
 print(f"Gold run_id: {GOLD_RUN_ID}")
 print(f"Load type: {LOAD_TYPE}")
-print(f"Incremental change mode: {incremental_change_mode}")
-print(f"Previous Gold processed_at watermark: {previous_gold_processed_at_utc}")
 print(f"As-of date: {AS_OF_DATE}")
+print(f"Analysis range: {ANALYSIS_START_DATE or 'earliest'} to {ANALYSIS_END_DATE}")
 print(f"Target frequency: {TARGET_FREQUENCY}")
 print(f"Aggregation method: {AGGREGATION_METHOD}")
-print(f"Causal transform type: {CAUSAL_TRANSFORM_TYPE}")
+print(f"Relationship transform type: {RELATIONSHIP_TRANSFORM_TYPE}")
 print(f"Target series: {TARGET_SERIES_ID}")
 print(f"Max lag periods: {MAX_LAG_PERIODS}")
+print(f"Minimum candidate score: {MIN_CANDIDATE_SCORE}")
 print(f"Include Silver warnings: {INCLUDE_QUALITY_WARNINGS}")
-print(f"Affected series count: {len(affected_series)}")
 print(f"Processing series count: {len(processing_series)}")
 print("Processing series:", ", ".join(processing_series[:20]) + (" ..." if len(processing_series) > 20 else ""))
 
@@ -295,6 +335,9 @@ spark.sql(
         {sql_literal(TRANSFORM_NAME)} AS transform_name,
         {sql_literal(TRANSFORM_VERSION)} AS transform_version,
         DATE {sql_literal(AS_OF_DATE)} AS as_of_date,
+        'revision_aware' AS history_type,
+        'realtime_window' AS availability_basis,
+        true AS is_revision_aware,
         source,
         series_id,
         domain,
@@ -346,10 +389,72 @@ spark.sql(
 
 spark.sql(
     """
-    CREATE OR REPLACE TEMP VIEW gold_asof_observations_stage AS
+    CREATE OR REPLACE TEMP VIEW gold_alfred_asof_observations_stage AS
     SELECT * EXCEPT (asof_version_rank)
     FROM gold_asof_candidates
     WHERE asof_version_rank = 1
+    """
+)
+
+spark.sql(
+    f"""
+    CREATE OR REPLACE TEMP VIEW gold_fred_current_asof_observations_stage AS
+    SELECT
+        {sql_literal(GOLD_RUN_ID)} AS gold_run_id,
+        {sql_literal(GOLD_PROCESSED_AT_UTC)} AS gold_processed_at_utc,
+        {sql_literal(TRANSFORM_NAME)} AS transform_name,
+        {sql_literal(TRANSFORM_VERSION)} AS transform_version,
+        DATE {sql_literal(AS_OF_DATE)} AS as_of_date,
+        'current_only' AS history_type,
+        'observation_date' AS availability_basis,
+        false AS is_revision_aware,
+        source,
+        upper(series_id) AS series_id,
+        domain,
+        priority,
+        silver_run_id,
+        silver_processed_at_utc,
+        bronze_run_id AS first_seen_bronze_run_id,
+        collected_at_utc AS first_collected_at_utc,
+        bronze_run_id AS last_seen_bronze_run_id,
+        collected_at_utc AS last_collected_at_utc,
+        to_date(observation_date) AS observation_date,
+        to_date(period_start) AS period_start,
+        to_date(period_end) AS period_end,
+        period_inference_basis,
+        value_numeric,
+        value_raw,
+        to_date(realtime_start) AS realtime_start,
+        to_date(realtime_end) AS realtime_end,
+        CAST(NULL AS DATE) AS vintage_date,
+        to_date(observation_date) AS available_at,
+        expected_frequency AS frequency,
+        CAST(NULL AS STRING) AS frequency_short,
+        CAST(NULL AS STRING) AS units,
+        CAST(NULL AS STRING) AS units_short,
+        CAST(NULL AS STRING) AS seasonal_adjustment,
+        current_observation_id AS observation_version_id,
+        CAST(NULL AS INT) AS revision_number,
+        CAST(NULL AS INT) AS revision_count,
+        false AS is_observation_date_revised,
+        is_outlier,
+        outlier_score,
+        quality_status,
+        quality_issues
+    FROM {silver_table("fred_current_observations_cleaned")}
+    WHERE {quality_predicate}
+      AND value_numeric IS NOT NULL
+      AND to_date(observation_date) <= DATE {sql_literal(AS_OF_DATE)}
+      AND {series_predicate}
+    """
+)
+
+spark.sql(
+    """
+    CREATE OR REPLACE TEMP VIEW gold_asof_observations_stage AS
+    SELECT * FROM gold_alfred_asof_observations_stage
+    UNION ALL
+    SELECT * FROM gold_fred_current_asof_observations_stage
     """
 )
 
@@ -412,6 +517,9 @@ spark.sql(
             target_frequency,
             aggregation_method,
             source,
+            first(history_type, true) AS history_type,
+            first(availability_basis, true) AS availability_basis,
+            max(CAST(is_revision_aware AS INT)) = 1 AS is_revision_aware,
             series_id,
             max(domain) AS domain,
             max(priority) AS priority,
@@ -460,9 +568,13 @@ spark.sql(
             WHEN aggregation_method = 'mean' THEN mean_value_numeric
             ELSE last_value_numeric
         END AS value_numeric,
-        sha2(concat_ws('|', as_of_date, target_frequency, aggregation_method, series_id, period_start), 256) AS gold_period_feature_id
+        {sql_date_expr(ANALYSIS_START_DATE)} AS analysis_start_date,
+        {sql_date_expr(ANALYSIS_END_DATE)} AS analysis_end_date,
+        sha2(concat_ws('|', as_of_date, {sql_date_expr(ANALYSIS_START_DATE)}, {sql_date_expr(ANALYSIS_END_DATE)}, target_frequency, aggregation_method, series_id, period_start), 256) AS gold_period_feature_id
     FROM period_aggregates
     WHERE period_start IS NOT NULL
+      {analysis_start_filter}
+      {analysis_end_filter}
     """
 )
 
@@ -526,7 +638,7 @@ spark.sql(
     CREATE OR REPLACE TEMP VIEW gold_transformed_features_stage AS
     SELECT
         *,
-        sha2(concat_ws('|', as_of_date, target_frequency, aggregation_method, series_id, period_start, transform_type), 256) AS gold_transformed_feature_id
+        sha2(concat_ws('|', as_of_date, analysis_start_date, analysis_end_date, target_frequency, aggregation_method, series_id, period_start, transform_type), 256) AS gold_transformed_feature_id
     FROM (
         SELECT
             gold_run_id,
@@ -534,9 +646,14 @@ spark.sql(
             transform_name,
             transform_version,
             as_of_date,
+            analysis_start_date,
+            analysis_end_date,
             target_frequency,
             aggregation_method,
             source,
+            history_type,
+            availability_basis,
+            is_revision_aware,
             series_id,
             domain,
             priority,
@@ -674,9 +791,14 @@ spark.sql(
         transform_name,
         transform_version,
         as_of_date,
+        analysis_start_date,
+        analysis_end_date,
         target_frequency,
         aggregation_method,
         source,
+        history_type,
+        availability_basis,
+        is_revision_aware,
         series_id,
         domain,
         priority,
@@ -713,7 +835,7 @@ spark.sql(
         source_max_silver_processed_at_utc,
         source_min_first_collected_at_utc,
         source_max_last_collected_at_utc,
-        sha2(concat_ws('|', as_of_date, target_frequency, aggregation_method, series_id), 256) AS gold_feature_snapshot_id
+        sha2(concat_ws('|', as_of_date, analysis_start_date, analysis_end_date, target_frequency, aggregation_method, series_id), 256) AS gold_feature_snapshot_id
     FROM gold_feature_table_stage
     WHERE latest_period_rank = 1
     """
@@ -752,6 +874,8 @@ spark.sql(
     CREATE OR REPLACE TEMP VIEW gold_target_periods AS
     SELECT
         as_of_date,
+        analysis_start_date,
+        analysis_end_date,
         target_frequency,
         aggregation_method,
         transform_type,
@@ -759,7 +883,7 @@ spark.sql(
         transformed_value AS target_value_numeric
     FROM gold_transformed_features_stage
     WHERE upper(series_id) = {sql_literal(TARGET_SERIES_ID)}
-      AND transform_type = {sql_literal(CAUSAL_TRANSFORM_TYPE)}
+      AND transform_type = {sql_literal(RELATIONSHIP_TRANSFORM_TYPE)}
     """
 )
 
@@ -768,11 +892,16 @@ spark.sql(
     CREATE OR REPLACE TEMP VIEW gold_candidate_pairs AS
     SELECT
         target.as_of_date,
+        target.analysis_start_date,
+        target.analysis_end_date,
         target.target_frequency,
         target.aggregation_method,
         target.transform_type,
         {sql_literal(TARGET_SERIES_ID)} AS target_series_id,
         candidate.series_id AS candidate_series_id,
+        candidate.history_type AS candidate_history_type,
+        candidate.availability_basis AS candidate_availability_basis,
+        candidate.is_revision_aware AS candidate_is_revision_aware,
         candidate.domain AS candidate_domain,
         candidate.priority AS candidate_priority,
         lag.lag_periods,
@@ -787,6 +916,8 @@ spark.sql(
     CROSS JOIN gold_lag_values lag
     JOIN gold_transformed_features_stage candidate
       ON candidate.as_of_date = target.as_of_date
+     AND candidate.analysis_start_date <=> target.analysis_start_date
+     AND candidate.analysis_end_date <=> target.analysis_end_date
      AND candidate.target_frequency = target.target_frequency
      AND candidate.aggregation_method = target.aggregation_method
      AND candidate.transform_type = target.transform_type
@@ -798,25 +929,32 @@ spark.sql(
 
 spark.sql(
     f"""
-    CREATE OR REPLACE TEMP VIEW gold_causal_candidate_scores_stage AS
+    CREATE OR REPLACE TEMP VIEW gold_relationship_candidate_scores_stage AS
     WITH target_period_counts AS (
         SELECT
             as_of_date,
+            analysis_start_date,
+            analysis_end_date,
             target_frequency,
             aggregation_method,
             transform_type,
             count(*) AS target_period_count
         FROM gold_target_periods
-        GROUP BY as_of_date, target_frequency, aggregation_method, transform_type
+        GROUP BY as_of_date, analysis_start_date, analysis_end_date, target_frequency, aggregation_method, transform_type
     ),
     scored AS (
         SELECT
             pairs.as_of_date,
+            pairs.analysis_start_date,
+            pairs.analysis_end_date,
             pairs.target_frequency,
             pairs.aggregation_method,
             pairs.transform_type,
             pairs.target_series_id,
             pairs.candidate_series_id,
+            max(pairs.candidate_history_type) AS candidate_history_type,
+            max(pairs.candidate_availability_basis) AS candidate_availability_basis,
+            max(CAST(pairs.candidate_is_revision_aware AS INT)) = 1 AS candidate_is_revision_aware,
             max(pairs.candidate_domain) AS candidate_domain,
             max(pairs.candidate_priority) AS candidate_priority,
             pairs.lag_periods,
@@ -830,6 +968,8 @@ spark.sql(
           AND pairs.candidate_value_numeric IS NOT NULL
         GROUP BY
             pairs.as_of_date,
+            pairs.analysis_start_date,
+            pairs.analysis_end_date,
             pairs.target_frequency,
             pairs.aggregation_method,
             pairs.transform_type,
@@ -843,11 +983,16 @@ spark.sql(
         {sql_literal(TRANSFORM_NAME)} AS transform_name,
         {sql_literal(TRANSFORM_VERSION)} AS transform_version,
         scored.as_of_date,
+        scored.analysis_start_date,
+        scored.analysis_end_date,
         scored.target_frequency,
         scored.aggregation_method,
         scored.transform_type,
         scored.target_series_id,
         scored.candidate_series_id,
+        scored.candidate_history_type,
+        scored.candidate_availability_basis,
+        scored.candidate_is_revision_aware,
         scored.candidate_domain,
         scored.candidate_priority,
         scored.lag_periods,
@@ -856,33 +1001,40 @@ spark.sql(
         scored.pair_count / counts.target_period_count AS coverage_rate,
         scored.pearson_corr,
         abs(scored.pearson_corr) AS abs_pearson_corr,
-        abs(scored.pearson_corr) * (scored.pair_count / counts.target_period_count) AS candidate_score,
+        power(scored.pearson_corr, 2) AS r_squared,
+        power(scored.pearson_corr, 2) * (scored.pair_count / counts.target_period_count) AS candidate_score,
         scored.avg_candidate_quality_warning_count,
         scored.avg_candidate_outlier_count,
         scored.revised_period_count,
         DENSE_RANK() OVER (
-            PARTITION BY scored.as_of_date, scored.target_frequency, scored.aggregation_method, scored.transform_type, scored.target_series_id
-            ORDER BY abs(scored.pearson_corr) * (scored.pair_count / counts.target_period_count) DESC NULLS LAST
+            PARTITION BY scored.as_of_date, scored.analysis_start_date, scored.analysis_end_date, scored.target_frequency, scored.aggregation_method, scored.transform_type, scored.target_series_id
+            ORDER BY power(scored.pearson_corr, 2) * (scored.pair_count / counts.target_period_count) DESC NULLS LAST
         ) AS candidate_rank,
-        sha2(concat_ws('|', scored.as_of_date, scored.target_frequency, scored.aggregation_method, scored.transform_type, scored.target_series_id, scored.candidate_series_id, scored.lag_periods), 256) AS gold_candidate_score_id
+        sha2(concat_ws('|', scored.as_of_date, scored.analysis_start_date, scored.analysis_end_date, scored.target_frequency, scored.aggregation_method, scored.transform_type, scored.target_series_id, scored.candidate_series_id, scored.lag_periods), 256) AS gold_relationship_candidate_score_id
     FROM scored
-    JOIN target_period_counts counts USING (as_of_date, target_frequency, aggregation_method, transform_type)
+    JOIN target_period_counts counts
+      ON counts.as_of_date = scored.as_of_date
+     AND counts.analysis_start_date <=> scored.analysis_start_date
+     AND counts.analysis_end_date <=> scored.analysis_end_date
+     AND counts.target_frequency = scored.target_frequency
+     AND counts.aggregation_method = scored.aggregation_method
+     AND counts.transform_type = scored.transform_type
     WHERE scored.pair_count >= {MIN_PAIR_COUNT}
     """
 )
 
-create_empty_delta_table_from_view(gold_table("fred_causal_candidate_scores"), "gold_causal_candidate_scores_stage")
-ensure_table_has_source_columns(gold_table("fred_causal_candidate_scores"), "gold_causal_candidate_scores_stage")
+create_empty_delta_table_from_view(gold_table("fred_relationship_candidate_scores"), "gold_relationship_candidate_scores_stage")
+ensure_table_has_source_columns(gold_table("fred_relationship_candidate_scores"), "gold_relationship_candidate_scores_stage")
 delete_where(
-    gold_table("fred_causal_candidate_scores"),
-    f"as_of_date = DATE {sql_literal(AS_OF_DATE)} AND target_frequency = {sql_literal(TARGET_FREQUENCY)} AND aggregation_method = {sql_literal(AGGREGATION_METHOD)} AND transform_type = {sql_literal(CAUSAL_TRANSFORM_TYPE)} AND target_series_id = {sql_literal(TARGET_SERIES_ID)} AND {candidate_delete_predicate}",
+    gold_table("fred_relationship_candidate_scores"),
+    f"as_of_date = DATE {sql_literal(AS_OF_DATE)} AND target_frequency = {sql_literal(TARGET_FREQUENCY)} AND aggregation_method = {sql_literal(AGGREGATION_METHOD)} AND transform_type = {sql_literal(RELATIONSHIP_TRANSFORM_TYPE)} AND target_series_id = {sql_literal(TARGET_SERIES_ID)} AND {candidate_delete_predicate}",
 )
 merge_view(
-    gold_table("fred_causal_candidate_scores"),
-    "gold_causal_candidate_scores_stage",
-    ["as_of_date", "target_frequency", "aggregation_method", "transform_type", "target_series_id", "candidate_series_id", "lag_periods"],
+    gold_table("fred_relationship_candidate_scores"),
+    "gold_relationship_candidate_scores_stage",
+    ["as_of_date", "analysis_start_date", "analysis_end_date", "target_frequency", "aggregation_method", "transform_type", "target_series_id", "candidate_series_id", "lag_periods"],
 )
-set_delta_properties(gold_table("fred_causal_candidate_scores"))
+set_delta_properties(gold_table("fred_relationship_candidate_scores"))
 
 # COMMAND ----------
 
@@ -894,7 +1046,7 @@ spark.sql(
         SELECT
             *,
             ROW_NUMBER() OVER (
-                PARTITION BY target_frequency, aggregation_method, series_id
+                PARTITION BY analysis_start_date, analysis_end_date, target_frequency, aggregation_method, series_id
                 ORDER BY as_of_date DESC, gold_processed_at_utc DESC
             ) AS latest_rank
         FROM {gold_table("fred_series_feature_snapshot")}
@@ -905,17 +1057,17 @@ spark.sql(
 
 spark.sql(
     f"""
-    CREATE OR REPLACE VIEW {gold_table("fred_top_causal_candidates")} AS
+    CREATE OR REPLACE VIEW {gold_table("fred_top_relationship_candidates")} AS
     SELECT * EXCEPT (latest_rank)
     FROM (
         SELECT
             *,
             ROW_NUMBER() OVER (
-                PARTITION BY target_frequency, aggregation_method, transform_type, target_series_id, candidate_series_id, lag_periods
+                PARTITION BY analysis_start_date, analysis_end_date, target_frequency, aggregation_method, transform_type, target_series_id, candidate_series_id, lag_periods
                 ORDER BY as_of_date DESC, gold_processed_at_utc DESC
             ) AS latest_rank
-        FROM {gold_table("fred_causal_candidate_scores")}
-        WHERE candidate_rank <= 20
+        FROM {gold_table("fred_relationship_candidate_scores")}
+        WHERE candidate_score >= {MIN_CANDIDATE_SCORE}
     ) ranked
     WHERE latest_rank = 1
     """
@@ -932,6 +1084,8 @@ spark.sql(
         {sql_literal(TRANSFORM_NAME)} AS transform_name,
         {sql_literal(TRANSFORM_VERSION)} AS transform_version,
         DATE {sql_literal(AS_OF_DATE)} AS as_of_date,
+        {sql_date_expr(ANALYSIS_START_DATE)} AS analysis_start_date,
+        {sql_date_expr(ANALYSIS_END_DATE)} AS analysis_end_date,
         {sql_literal(TARGET_FREQUENCY)} AS target_frequency,
         {sql_literal(AGGREGATION_METHOD)} AS aggregation_method,
         'asof_not_before_observation' AS rule_name,
@@ -945,6 +1099,8 @@ spark.sql(
         {sql_literal(TRANSFORM_NAME)},
         {sql_literal(TRANSFORM_VERSION)},
         DATE {sql_literal(AS_OF_DATE)},
+        {sql_date_expr(ANALYSIS_START_DATE)},
+        {sql_date_expr(ANALYSIS_END_DATE)},
         {sql_literal(TARGET_FREQUENCY)},
         {sql_literal(AGGREGATION_METHOD)},
         'visible_inside_realtime_window',
@@ -962,6 +1118,8 @@ spark.sql(
         {sql_literal(TRANSFORM_NAME)},
         {sql_literal(TRANSFORM_VERSION)},
         DATE {sql_literal(AS_OF_DATE)},
+        {sql_date_expr(ANALYSIS_START_DATE)},
+        {sql_date_expr(ANALYSIS_END_DATE)},
         {sql_literal(TARGET_FREQUENCY)},
         {sql_literal(AGGREGATION_METHOD)},
         'period_feature_value_not_null',
@@ -975,12 +1133,14 @@ spark.sql(
         {sql_literal(TRANSFORM_NAME)},
         {sql_literal(TRANSFORM_VERSION)},
         DATE {sql_literal(AS_OF_DATE)},
+        {sql_date_expr(ANALYSIS_START_DATE)},
+        {sql_date_expr(ANALYSIS_END_DATE)},
         {sql_literal(TARGET_FREQUENCY)},
         {sql_literal(AGGREGATION_METHOD)},
         'candidate_scores_meet_min_pair_count',
         'warning',
-        CAST((SELECT count(*) FROM gold_causal_candidate_scores_stage) AS BIGINT),
-        CAST((SELECT count(*) FROM gold_causal_candidate_scores_stage WHERE pair_count < {MIN_PAIR_COUNT}) AS BIGINT)
+        CAST((SELECT count(*) FROM gold_relationship_candidate_scores_stage) AS BIGINT),
+        CAST((SELECT count(*) FROM gold_relationship_candidate_scores_stage WHERE pair_count < {MIN_PAIR_COUNT}) AS BIGINT)
     """
 )
 
@@ -1008,22 +1168,19 @@ spark.sql(
         {sql_literal(TRANSFORM_NAME)} AS transform_name,
         {sql_literal(TRANSFORM_VERSION)} AS transform_version,
         DATE {sql_literal(AS_OF_DATE)} AS as_of_date,
+        {sql_date_expr(ANALYSIS_START_DATE)} AS analysis_start_date,
+        {sql_date_expr(ANALYSIS_END_DATE)} AS analysis_end_date,
         {sql_literal(TARGET_FREQUENCY)} AS target_frequency,
         {sql_literal(AGGREGATION_METHOD)} AS aggregation_method,
-        {sql_literal(CAUSAL_TRANSFORM_TYPE)} AS causal_transform_type,
+        {sql_literal(RELATIONSHIP_TRANSFORM_TYPE)} AS relationship_transform_type,
         {sql_literal(TARGET_SERIES_ID)} AS target_series_id,
         {sql_literal(LOAD_TYPE)} AS load_type,
-        {sql_literal(incremental_change_mode)} AS incremental_change_mode,
-        CAST({sql_literal(previous_gold_processed_at_utc)} AS STRING) AS previous_gold_processed_at_utc,
-        {sql_literal(str(MATERIALIZE_COMPLETE_ASOF_SNAPSHOT).lower())} AS materialize_complete_asof_snapshot,
-        CAST({changed_silver_row_count} AS BIGINT) AS changed_silver_row_count,
-        CAST({len(affected_series)} AS BIGINT) AS affected_series_count,
         CAST({len(processing_series)} AS BIGINT) AS processing_series_count,
         CAST((SELECT count(*) FROM gold_asof_observations_stage) AS BIGINT) AS asof_observation_count,
         CAST((SELECT count(*) FROM gold_period_features_stage) AS BIGINT) AS period_feature_count,
         CAST((SELECT count(*) FROM gold_transformed_features_stage) AS BIGINT) AS transformed_feature_count,
         CAST((SELECT count(*) FROM gold_series_feature_snapshot_stage) AS BIGINT) AS feature_snapshot_count,
-        CAST((SELECT count(*) FROM gold_causal_candidate_scores_stage) AS BIGINT) AS candidate_score_count,
+        CAST((SELECT count(*) FROM gold_relationship_candidate_scores_stage) AS BIGINT) AS relationship_candidate_score_count,
         CAST((SELECT count(DISTINCT series_id) FROM gold_asof_observations_stage) AS BIGINT) AS series_count,
         CAST((SELECT count(*) FROM gold_asof_observations_stage WHERE quality_status = 'warning') AS BIGINT) AS silver_warning_rows_used,
         CAST((SELECT count(*) FROM gold_quality_report_final WHERE rule_status = 'fail') AS BIGINT) AS failed_quality_rule_count,
@@ -1033,7 +1190,8 @@ spark.sql(
         (SELECT max(last_collected_at_utc) FROM gold_asof_observations_stage) AS source_max_last_collected_at_utc,
         {sql_literal(str(INCLUDE_QUALITY_WARNINGS).lower())} AS include_quality_warnings,
         {MAX_LAG_PERIODS} AS max_lag_periods,
-        {MIN_PAIR_COUNT} AS min_pair_count
+        {MIN_PAIR_COUNT} AS min_pair_count,
+        {MIN_CANDIDATE_SCORE} AS min_candidate_score
     """
 )
 
@@ -1047,7 +1205,7 @@ for table, zorder_columns in [
     (gold_table("fred_period_features_long"), ["as_of_date", "series_id"]),
     (gold_table("fred_transformed_features_long"), ["as_of_date", "series_id", "transform_type"]),
     (gold_table("fred_series_feature_snapshot"), ["as_of_date", "series_id"]),
-    (gold_table("fred_causal_candidate_scores"), ["as_of_date", "target_series_id"]),
+    (gold_table("fred_relationship_candidate_scores"), ["as_of_date", "target_series_id"]),
 ]:
     optimize_table(table, zorder_columns)
 
@@ -1073,8 +1231,14 @@ display(spark.table(gold_table("fred_gold_run_summary")).where(f"gold_run_id = '
 # COMMAND ----------
 
 display(
-    spark.table(gold_table("fred_top_causal_candidates"))
-    .where(f"as_of_date = DATE '{AS_OF_DATE}' AND transform_type = '{CAUSAL_TRANSFORM_TYPE}' AND target_series_id = '{TARGET_SERIES_ID}'")
-    .orderBy("candidate_rank")
+    spark.table(gold_table("fred_top_relationship_candidates"))
+    .where(
+        f"as_of_date = DATE '{AS_OF_DATE}' "
+        f"AND analysis_start_date <=> {sql_date_expr(ANALYSIS_START_DATE)} "
+        f"AND analysis_end_date <=> {sql_date_expr(ANALYSIS_END_DATE)} "
+        f"AND transform_type = '{RELATIONSHIP_TRANSFORM_TYPE}' "
+        f"AND target_series_id = '{TARGET_SERIES_ID}'"
+    )
+    .orderBy("candidate_score", ascending=False)
 )
 
