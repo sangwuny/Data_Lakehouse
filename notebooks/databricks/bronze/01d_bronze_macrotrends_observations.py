@@ -10,6 +10,7 @@
 
 # COMMAND ----------
 
+import calendar
 import csv
 import hashlib
 import json
@@ -28,6 +29,8 @@ dbutils.widgets.text("source_data_path", "../macrotrends", "Macrotrends CSV file
 dbutils.widgets.text("file_glob", "*_chart_*.csv", "File glob when source_data_path is a directory")
 dbutils.widgets.text("series_ids", "BAMLH0A0HYM2", "Series IDs: BAMLH0A0HYM2 or ALL")
 dbutils.widgets.text("date_formats", "%m/%d/%Y,%Y-%m-%d", "Accepted CSV date formats")
+dbutils.widgets.text("series_metadata_path", "../configs/fred_series_metadata.json", "FRED series metadata JSON path")
+dbutils.widgets.text("series_units_json", "{}", "Series metadata override JSON")
 
 CATALOG = dbutils.widgets.get("catalog").strip()
 BRONZE_SCHEMA = dbutils.widgets.get("bronze_schema").strip()
@@ -35,6 +38,8 @@ SOURCE_DATA_PATH = dbutils.widgets.get("source_data_path").strip()
 FILE_GLOB = dbutils.widgets.get("file_glob").strip() or "*.csv"
 SERIES_IDS_PARAM = dbutils.widgets.get("series_ids").strip()
 DATE_FORMATS = [item.strip() for item in dbutils.widgets.get("date_formats").split(",") if item.strip()]
+SERIES_METADATA_PATH = dbutils.widgets.get("series_metadata_path").strip()
+SERIES_UNITS_JSON = dbutils.widgets.get("series_units_json").strip()
 
 SOURCE = "fred"
 DATA_PROVIDER = "macrotrends"
@@ -127,6 +132,119 @@ def stable_hash(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
+def parse_iso_date(value: str | None):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def infer_period_bounds(observation_date: str | None, frequency_short: str | None) -> dict[str, str | None]:
+    observed = parse_iso_date(observation_date)
+    frequency = (frequency_short or "").upper()
+    if observed is None:
+        return {
+            "period_start_inferred": None,
+            "period_end_inferred": None,
+            "period_inference_basis": "unavailable",
+        }
+    if frequency == "D":
+        start = end = observed
+        basis = "daily_observation_date"
+    elif frequency == "M":
+        start = observed.replace(day=1)
+        end = observed.replace(day=calendar.monthrange(observed.year, observed.month)[1])
+        basis = "monthly_calendar_period"
+    elif frequency == "Q":
+        start_month = ((observed.month - 1) // 3) * 3 + 1
+        end_month = start_month + 2
+        start = observed.replace(month=start_month, day=1)
+        end = observed.replace(month=end_month, day=calendar.monthrange(observed.year, end_month)[1])
+        basis = "quarterly_calendar_period"
+    elif frequency in {"A", "Y"}:
+        start = observed.replace(month=1, day=1)
+        end = observed.replace(month=12, day=31)
+        basis = "annual_calendar_period"
+    else:
+        start = end = observed
+        basis = "observation_date_only"
+    return {
+        "period_start_inferred": start.isoformat() if start else None,
+        "period_end_inferred": end.isoformat() if end else None,
+        "period_inference_basis": basis,
+    }
+
+
+def load_series_metadata_catalog(path: str) -> dict[str, dict[str, Any]]:
+    if not path:
+        return {}
+    errors = []
+    for candidate in path_candidates(path):
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("series"), dict):
+                raw_items = payload["series"]
+            elif isinstance(payload, dict):
+                raw_items = payload
+            elif isinstance(payload, list):
+                raw_items = {item.get("series_id") or item.get("id"): item for item in payload if isinstance(item, dict)}
+            else:
+                raise ValueError("series metadata JSON must be an object or list")
+
+            catalog = {}
+            for key, item in raw_items.items():
+                if not isinstance(item, dict):
+                    continue
+                series_id = str(item.get("series_id") or item.get("id") or key).upper()
+                catalog[series_id] = dict(item)
+            print(f"Loaded FRED series metadata: {candidate} ({len(catalog)} series)")
+            return catalog
+        except Exception as exc:
+            errors.append(f"{candidate}: {exc}")
+    raise FileNotFoundError(
+        "FRED series metadata JSON was not found. Run notebooks/databricks/configs/build_fred_series_metadata.py first. Tried:\n"
+        + "\n".join(errors)
+    )
+
+
+def parse_series_metadata_map(value: str) -> dict[str, dict[str, Any]]:
+    if not value:
+        return {}
+    payload = json.loads(value)
+    if not isinstance(payload, dict):
+        raise ValueError("series_units_json must be a JSON object keyed by series_id")
+    return {str(key).upper(): dict(item) for key, item in payload.items() if isinstance(item, dict)}
+
+
+SERIES_METADATA_CATALOG = load_series_metadata_catalog(SERIES_METADATA_PATH)
+SERIES_METADATA_OVERRIDES = parse_series_metadata_map(SERIES_UNITS_JSON)
+
+
+def metadata_for_series(series_id: str) -> dict[str, Any]:
+    normalized = series_id.upper()
+    base_metadata = dict(SERIES_METADATA_CATALOG.get(normalized, {}))
+    override_metadata = dict(SERIES_METADATA_OVERRIDES.get(normalized, {}))
+    metadata = {**base_metadata, **override_metadata}
+    if not metadata:
+        raise ValueError(
+            f"No FRED series metadata found for {normalized}. "
+            "Run notebooks/databricks/configs/build_fred_series_metadata.py first."
+        )
+    metadata["series_id"] = normalized
+    metadata["metadata_source"] = "fred_series_metadata_json" if base_metadata else "series_units_json_override"
+    if base_metadata:
+        metadata["metadata_path"] = SERIES_METADATA_PATH
+    if override_metadata:
+        metadata["metadata_override_applied"] = True
+    if not metadata.get("title") and metadata.get("seed_description"):
+        metadata["title"] = metadata.get("seed_description")
+    if not metadata.get("units_short"):
+        metadata["units_short"] = metadata.get("units")
+    return metadata
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -164,6 +282,21 @@ CURRENT_OBSERVATION_SCHEMA = string_schema(
         "realtime_end",
         "observation_date",
         "value_raw",
+        "domain",
+        "priority",
+        "expected_frequency",
+        "period_start_inferred",
+        "period_end_inferred",
+        "period_inference_basis",
+        "data_provider",
+        "title",
+        "frequency",
+        "frequency_short",
+        "units",
+        "units_short",
+        "seasonal_adjustment",
+        "seasonal_adjustment_short",
+        "source_metadata_json",
         "source",
         "series_id",
         "endpoint",
@@ -189,11 +322,16 @@ def spark_sql_type(field: StructField) -> str:
 
 
 def ensure_delta_table(table: str, schema: StructType) -> None:
+    qualified_table = table_name(table)
     columns = ",\n  ".join(f"{quote_ident(field.name)} {spark_sql_type(field)}" for field in schema.fields)
-    spark.sql(f"CREATE TABLE IF NOT EXISTS {table_name(table)} (\n  {columns}\n) USING DELTA")
+    spark.sql(f"CREATE TABLE IF NOT EXISTS {qualified_table} (\n  {columns}\n) USING DELTA")
+    existing_columns = {field.name for field in spark.table(qualified_table.replace("`", "")).schema.fields}
+    for field in schema.fields:
+        if field.name not in existing_columns:
+            spark.sql(f"ALTER TABLE {qualified_table} ADD COLUMNS ({quote_ident(field.name)} {spark_sql_type(field)})")
     spark.sql(
         f"""
-        ALTER TABLE {table_name(table)} SET TBLPROPERTIES (
+        ALTER TABLE {qualified_table} SET TBLPROPERTIES (
           'quality' = 'bronze',
           'lakehouse.layer' = 'bronze',
           'pipeline.family' = 'fred_current',
@@ -219,7 +357,14 @@ def merge_upsert_rows(table: str, rows: list[dict[str, Any]], schema: StructType
     spark.createDataFrame(ordered_rows, schema=schema).createOrReplaceTempView(view_name)
 
     update_fields = [field.name for field in schema.fields if field.name not in key_fields]
-    source_value_fields = ["value_raw", "realtime_start", "realtime_end"]
+    source_value_fields = [
+        field for field in [
+            "value_raw", "realtime_start", "realtime_end", "domain", "priority", "expected_frequency",
+            "period_start_inferred", "period_end_inferred", "period_inference_basis", "data_provider", "title", "frequency",
+            "frequency_short", "units", "units_short", "seasonal_adjustment", "seasonal_adjustment_short", "source_metadata_json",
+        ]
+        if field in [schema_field.name for schema_field in schema.fields]
+    ]
     on_clause = " AND ".join(f"target.{quote_ident(field)} <=> source.{quote_ident(field)}" for field in key_fields)
     update_predicate = " OR ".join(
         f"NOT (target.{quote_ident(field)} <=> source.{quote_ident(field)})" for field in source_value_fields
@@ -244,6 +389,7 @@ ensure_delta_table("fred_current_observations_raw", CURRENT_OBSERVATION_SCHEMA)
 
 def rows_from_macrotrends_csv(path: Path) -> list[dict[str, Any]]:
     series_id = infer_series_id(path)
+    series_metadata = metadata_for_series(series_id)
     file_hash = file_sha256(path)
     file_stat = path.stat()
     file_metadata = {
@@ -251,6 +397,11 @@ def rows_from_macrotrends_csv(path: Path) -> list[dict[str, Any]]:
         "source_file_size_bytes": str(file_stat.st_size),
         "source_file_modified_at_utc": iso_utc_from_timestamp(file_stat.st_mtime),
         "source_file_hash": file_hash,
+    }
+    source_metadata = {
+        "data_provider": DATA_PROVIDER,
+        "series_metadata": series_metadata,
+        **file_metadata,
     }
     request_params = {
         "data_provider": DATA_PROVIDER,
@@ -262,6 +413,7 @@ def rows_from_macrotrends_csv(path: Path) -> list[dict[str, Any]]:
         "source_file_modified_at_utc": file_metadata["source_file_modified_at_utc"],
         "source_file_size_bytes": file_metadata["source_file_size_bytes"],
         "source_file_hash": file_metadata["source_file_hash"],
+        "series_metadata": series_metadata,
     }
 
     rows = []
@@ -275,6 +427,7 @@ def rows_from_macrotrends_csv(path: Path) -> list[dict[str, Any]]:
             if not date_raw:
                 continue
             observation_date = parse_observation_date(date_raw)
+            period = infer_period_bounds(observation_date, series_metadata.get("frequency_short"))
             row_hash = stable_hash(
                 {
                     "source": SOURCE,
@@ -295,6 +448,21 @@ def rows_from_macrotrends_csv(path: Path) -> list[dict[str, Any]]:
                     "series_id": series_id,
                     "observation_date": observation_date,
                     "value_raw": value_raw,
+                    "domain": series_metadata.get("domain"),
+                    "priority": series_metadata.get("priority"),
+                    "expected_frequency": series_metadata.get("expected_frequency"),
+                    "period_start_inferred": period["period_start_inferred"],
+                    "period_end_inferred": period["period_end_inferred"],
+                    "period_inference_basis": period["period_inference_basis"],
+                    "data_provider": DATA_PROVIDER,
+                    "title": series_metadata.get("title"),
+                    "frequency": series_metadata.get("frequency"),
+                    "frequency_short": series_metadata.get("frequency_short"),
+                    "units": series_metadata.get("units"),
+                    "units_short": series_metadata.get("units_short"),
+                    "seasonal_adjustment": series_metadata.get("seasonal_adjustment"),
+                    "seasonal_adjustment_short": series_metadata.get("seasonal_adjustment_short"),
+                    "source_metadata_json": json.dumps(source_metadata, sort_keys=True, ensure_ascii=False),
                     "realtime_start": observation_date,
                     "realtime_end": "9999-12-31",
                     "endpoint": "macrotrends_csv",

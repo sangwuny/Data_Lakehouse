@@ -1,18 +1,19 @@
 # Silver Layer
 
-This document describes the current Silver layer for the FRED/ALFRED lakehouse. Silver converts Bronze data into typed, quality-tagged, analytics-ready tables while preserving the time semantics needed by Gold.
+This document describes the current Silver layer for the FRED/ALFRED lakehouse. Silver converts Bronze data into typed, quality-tagged, analytics-ready tables while preserving the time semantics and source metadata needed by Gold.
 
 ## Purpose
 
-Silver has five jobs:
+Silver has six jobs:
 
 1. Convert raw string dates and values into typed date and numeric columns.
 2. Identify missing values, parse errors, invalid real-time windows, and outliers.
 3. Preserve ALFRED revision ordering and point-in-time usability.
 4. Keep FRED current-only data separate from ALFRED revision-aware data.
-5. Provide stable inputs for the integrated Gold as-of feature mart.
+5. Preserve canonical metadata such as units, frequency, seasonal adjustment, domain, and priority.
+6. Provide stable inputs for the integrated Gold as-of feature mart.
 
-Silver does not create purpose-specific modeling features. It provides clean enterprise tables that Gold can transform for dashboards and relationship scoring.
+Silver does not create purpose-specific modeling features. It provides clean enterprise tables that Gold can transform for dashboards, feature engineering, and lagged correlation analysis.
 
 ## Inputs And Outputs
 
@@ -83,10 +84,23 @@ Important semantics:
 - Gold can still include them in as-of analysis by using `observation_date <= as_of_date`.
 - `is_point_in_time_safe = false` is preserved so the difference from ALFRED revision-aware rows is explicit.
 - Provider lineage is preserved for rows sourced from FRED, Macrotrends, or Yahoo Finance.
+- Canonical FRED metadata is preserved for units-aware transformations and interpretation.
+
+Important current-only metadata columns:
+
+```text
+domain, priority, expected_frequency
+period_start, period_end, period_inference_basis
+data_provider, title, frequency, frequency_short
+units, units_short, seasonal_adjustment, seasonal_adjustment_short
+source_metadata_json
+```
+
+When Bronze rows already include inferred period boundaries, Silver prefers those values. If older Bronze rows are missing the fields, `02c` falls back to seed metadata and observation dates where possible.
 
 ## Gold Integration
 
-The current Gold layer is a single integrated notebook:
+The current Gold feature mart is built by:
 
 ```text
 silver.fred_observation_versions_cleaned
@@ -94,20 +108,27 @@ silver.fred_current_observations_cleaned
 -> gold/03_gold_fred_asof_features.py
 ```
 
-Gold integrates both Silver inputs into:
+`03_gold_fred_asof_features.py` integrates both Silver inputs into:
 
 - `fred_asof_observations`
 - `fred_period_features_long`
 - `fred_transformed_features_long`
 - `fred_series_feature_snapshot`
-- `fred_relationship_candidate_scores`
+- `fred_latest_feature_snapshot`
+
+The optional 03b Gold notebook reads `fred_transformed_features_long` for lagged Pearson correlation analysis:
+
+```text
+gold/03b_gold_lagged_correlation_analysis.py
+```
 
 ## Recommended Execution
 
 Initial build:
 
 ```text
-bronze/01a_bronze_fred_bootstrap_versions.py
+configs/build_fred_series_metadata.py
+-> bronze/01a_bronze_fred_bootstrap_versions.py
 -> bronze/01d_bronze_macrotrends_observations.py      when needed
 -> bronze/01f_bronze_yahoo_finance_observations.py   when needed
 -> bronze/01c_bronze_fred_current_observations.py
@@ -128,4 +149,4 @@ bronze/01b_bronze_fred_incremental_versions.py
 
 ## Summary
 
-Silver sits between Bronze preservation and Gold analysis. It keeps ALFRED revision-aware rows and FRED current-only rows separate, preserves their different time semantics, and gives Gold stable clean inputs for integrated as-of analysis.
+Silver sits between Bronze preservation and Gold analysis. It keeps ALFRED revision-aware rows and FRED current-only rows separate, preserves their different time semantics, carries canonical metadata forward, and gives Gold stable clean inputs for integrated as-of analysis.

@@ -1,4 +1,4 @@
-﻿# Databricks notebook source
+# Databricks notebook source
 # MAGIC %md
 # MAGIC # 01c Bronze FRED Current Observations
 # MAGIC
@@ -9,10 +9,11 @@
 
 # COMMAND ----------
 
+import calendar
 import hashlib
 import json
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib import error, parse, request
@@ -28,7 +29,7 @@ dbutils.widgets.text("secret_scope", "fred-lakehouse", "Secret scope")
 dbutils.widgets.text("secret_key", "fred_api_key", "Secret key")
 dbutils.widgets.text("seed_catalog_path", "../configs/fred_seed_series.json", "Seed catalog path")
 dbutils.widgets.text("series_ids", "ALL", "FRED-only series IDs: SP500 or ALL")
-dbutils.widgets.text("observation_start", "2010-01-01", "Observation start")
+dbutils.widgets.text("observation_start", "", "Observation start")
 dbutils.widgets.text("observation_end", "", "Observation end")
 dbutils.widgets.text("sleep_seconds", "0", "Sleep seconds")
 dbutils.widgets.text("retry_sleep_seconds", "0.05,0.1,0.5", "Retry sleep seconds")
@@ -39,7 +40,7 @@ SECRET_SCOPE = dbutils.widgets.get("secret_scope").strip()
 SECRET_KEY = dbutils.widgets.get("secret_key").strip()
 SEED_CATALOG_PATH = dbutils.widgets.get("seed_catalog_path").strip()
 SERIES_IDS_PARAM = dbutils.widgets.get("series_ids").strip()
-OBSERVATION_START = dbutils.widgets.get("observation_start").strip() or "2010-01-01"
+OBSERVATION_START = dbutils.widgets.get("observation_start").strip() or "1776-07-04"
 OBSERVATION_END = dbutils.widgets.get("observation_end").strip() or None
 SLEEP_SECONDS = float(dbutils.widgets.get("sleep_seconds"))
 RETRY_SLEEP_SECONDS_PARAM = dbutils.widgets.get("retry_sleep_seconds").strip()
@@ -187,6 +188,51 @@ def retry_sleep_schedule(base_sleep_seconds: float) -> list[float]:
     return schedule
 
 
+def parse_iso_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def infer_period_bounds(observation_date: str | None, frequency_short: str | None) -> dict[str, str | None]:
+    observed = parse_iso_date(observation_date)
+    frequency = (frequency_short or "").upper()
+    if observed is None:
+        return {
+            "period_start_inferred": None,
+            "period_end_inferred": None,
+            "period_inference_basis": "unavailable",
+        }
+    if frequency == "D":
+        start = end = observed
+        basis = "daily_observation_date"
+    elif frequency == "M":
+        start = date(observed.year, observed.month, 1)
+        end = date(observed.year, observed.month, calendar.monthrange(observed.year, observed.month)[1])
+        basis = "monthly_calendar_period"
+    elif frequency == "Q":
+        start_month = ((observed.month - 1) // 3) * 3 + 1
+        end_month = start_month + 2
+        start = date(observed.year, start_month, 1)
+        end = date(observed.year, end_month, calendar.monthrange(observed.year, end_month)[1])
+        basis = "quarterly_calendar_period"
+    elif frequency in {"A", "Y"}:
+        start = date(observed.year, 1, 1)
+        end = date(observed.year, 12, 31)
+        basis = "annual_calendar_period"
+    else:
+        start = end = observed
+        basis = "observation_date_only"
+    return {
+        "period_start_inferred": start.isoformat() if start else None,
+        "period_end_inferred": end.isoformat() if end else None,
+        "period_inference_basis": basis,
+    }
+
+
 def sleep_if_needed(seconds: float) -> None:
     if seconds > 0:
         time.sleep(seconds)
@@ -261,6 +307,10 @@ def series_current_observations(series_id: str) -> list[dict[str, Any]]:
             break
     return responses
 
+
+def series_metadata(series_id: str) -> dict[str, Any]:
+    return fred_get("/fred/series", {"series_id": series_id})
+
 # COMMAND ----------
 
 def string_schema(fields: list[str], integer_fields: set[str] | None = None) -> StructType:
@@ -274,6 +324,21 @@ CURRENT_OBSERVATION_SCHEMA = string_schema(
         "realtime_end",
         "observation_date",
         "value_raw",
+        "domain",
+        "priority",
+        "expected_frequency",
+        "period_start_inferred",
+        "period_end_inferred",
+        "period_inference_basis",
+        "data_provider",
+        "title",
+        "frequency",
+        "frequency_short",
+        "units",
+        "units_short",
+        "seasonal_adjustment",
+        "seasonal_adjustment_short",
+        "source_metadata_json",
         "source",
         "series_id",
         "endpoint",
@@ -299,11 +364,16 @@ def spark_sql_type(field: StructField) -> str:
 
 
 def ensure_delta_table(table: str, schema: StructType) -> None:
+    qualified_table = table_name(table)
     columns = ",\n  ".join(f"{quote_ident(field.name)} {spark_sql_type(field)}" for field in schema.fields)
-    spark.sql(f"CREATE TABLE IF NOT EXISTS {table_name(table)} (\n  {columns}\n) USING DELTA")
+    spark.sql(f"CREATE TABLE IF NOT EXISTS {qualified_table} (\n  {columns}\n) USING DELTA")
+    existing_columns = {field.name for field in spark.table(qualified_table.replace("`", "")).schema.fields}
+    for field in schema.fields:
+        if field.name not in existing_columns:
+            spark.sql(f"ALTER TABLE {qualified_table} ADD COLUMNS ({quote_ident(field.name)} {spark_sql_type(field)})")
     spark.sql(
         f"""
-        ALTER TABLE {table_name(table)} SET TBLPROPERTIES (
+        ALTER TABLE {qualified_table} SET TBLPROPERTIES (
           'quality' = 'bronze',
           'lakehouse.layer' = 'bronze',
           'pipeline.family' = 'fred_current',
@@ -329,7 +399,14 @@ def merge_upsert_rows(table: str, rows: list[dict[str, Any]], schema: StructType
     spark.createDataFrame(ordered_rows, schema=schema).createOrReplaceTempView(view_name)
 
     update_fields = [field.name for field in schema.fields if field.name not in key_fields]
-    source_value_fields = ["value_raw", "realtime_start", "realtime_end"]
+    source_value_fields = [
+        field for field in [
+            "value_raw", "realtime_start", "realtime_end", "domain", "priority", "expected_frequency",
+            "period_start_inferred", "period_end_inferred", "period_inference_basis", "data_provider", "title", "frequency",
+            "frequency_short", "units", "units_short", "seasonal_adjustment", "seasonal_adjustment_short", "source_metadata_json",
+        ]
+        if field in [schema_field.name for schema_field in schema.fields]
+    ]
     on_clause = " AND ".join(f"target.{quote_ident(field)} <=> source.{quote_ident(field)}" for field in key_fields)
     update_predicate = " OR ".join(
         f"NOT (target.{quote_ident(field)} <=> source.{quote_ident(field)})" for field in source_value_fields
@@ -354,18 +431,54 @@ ensure_delta_table("fred_current_observations_raw", CURRENT_OBSERVATION_SCHEMA)
 def response_to_current_rows(
     spec: dict[str, Any],
     response: dict[str, Any],
+    metadata_response: dict[str, Any],
     collected_at: str,
 ) -> list[dict[str, Any]]:
-    params_json = json.dumps(response["params"], ensure_ascii=False, sort_keys=True)
-    params_hash = stable_hash(response["params"])
+    series_metadata_rows = metadata_response.get("payload", {}).get("seriess", [])
+    series_metadata = series_metadata_rows[0] if series_metadata_rows else {}
+    source_metadata = {
+        "data_provider": "fred_api",
+        "metadata_endpoint": metadata_response.get("endpoint"),
+        "metadata_request_params_hash": stable_hash(metadata_response.get("params", {})),
+        "series_id": spec["series_id"],
+        "domain": spec.get("domain"),
+        "priority": spec.get("priority"),
+        "expected_frequency": spec.get("expected_frequency"),
+        "title": series_metadata.get("title"),
+        "frequency": series_metadata.get("frequency"),
+        "frequency_short": series_metadata.get("frequency_short"),
+        "units": series_metadata.get("units"),
+        "units_short": series_metadata.get("units_short"),
+        "seasonal_adjustment": series_metadata.get("seasonal_adjustment"),
+        "seasonal_adjustment_short": series_metadata.get("seasonal_adjustment_short"),
+    }
+    params_json = json.dumps({**response["params"], "series_metadata": source_metadata}, ensure_ascii=False, sort_keys=True)
+    params_hash = stable_hash({**response["params"], "series_metadata": source_metadata})
+    source_metadata_json = json.dumps(source_metadata, ensure_ascii=False, sort_keys=True)
     rows = []
     for item in response["payload"].get("observations", []):
+        period = infer_period_bounds(item.get("date"), series_metadata.get("frequency_short"))
         rows.append(
             {
                 "realtime_start": item.get("realtime_start"),
                 "realtime_end": item.get("realtime_end"),
                 "observation_date": item.get("date"),
                 "value_raw": item.get("value"),
+                "domain": spec.get("domain"),
+                "priority": spec.get("priority"),
+                "expected_frequency": spec.get("expected_frequency"),
+                "period_start_inferred": period["period_start_inferred"],
+                "period_end_inferred": period["period_end_inferred"],
+                "period_inference_basis": period["period_inference_basis"],
+                "data_provider": "fred_api",
+                "title": series_metadata.get("title"),
+                "frequency": series_metadata.get("frequency"),
+                "frequency_short": series_metadata.get("frequency_short"),
+                "units": series_metadata.get("units"),
+                "units_short": series_metadata.get("units_short"),
+                "seasonal_adjustment": series_metadata.get("seasonal_adjustment"),
+                "seasonal_adjustment_short": series_metadata.get("seasonal_adjustment_short"),
+                "source_metadata_json": source_metadata_json,
                 "source": SOURCE,
                 "series_id": spec["series_id"],
                 "endpoint": response["endpoint"],
@@ -397,11 +510,12 @@ for spec in selected_specs:
         try:
             if attempt_index > 1:
                 sleep_if_needed(attempt_sleep_seconds)
+            metadata_response = series_metadata(series_id)
             responses = series_current_observations(series_id)
             collected_at = iso_utc()
             rows = []
             for response in responses:
-                rows.extend(response_to_current_rows(spec, response, collected_at))
+                rows.extend(response_to_current_rows(spec, response, metadata_response, collected_at))
             merge_upsert_rows("fred_current_observations_raw", rows, CURRENT_OBSERVATION_SCHEMA, CURRENT_DEDUPE_KEY_FIELDS)
             active_sleep_seconds = attempt_sleep_seconds
             results.append(

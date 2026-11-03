@@ -268,5 +268,25 @@
     "description": "Security Brokers and Dealers; Receivables Due from Customers (Margin Loans and Other Receivables); Asset, Level",
     "role": "브로커·딜러 고객채권 / margin loan proxy",
     "alfred_available": true
+  },
+  {
+    "rank": 28,
+    "series_id": "NASDAQNQUSB40",
+    "domain": "financial_markets",
+    "priority": "core",
+    "expected_frequency": "daily",
+    "description": "Nasdaq US Benchmark Consumer Discretionary Index",
+    "role": "경기 민감 섹터 / risk-on consumer discretionary",
+    "alfred_available": true
+  },
+  {
+    "rank": 29,
+    "series_id": "NASDAQNQUSB45",
+    "domain": "financial_markets",
+    "priority": "core",
+    "expected_frequency": "daily",
+    "description": "Nasdaq US Benchmark Consumer Staples Index",
+    "role": "경기 안정 섹터 / defensive consumer staples",
+    "alfred_available": true
   }
 ]

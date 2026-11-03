@@ -1,16 +1,17 @@
 # Bronze Layer
 
-This document describes the current Bronze layer for the FRED/ALFRED lakehouse. Bronze preserves source-like external data, collection lineage, request metadata, and enough timing fields for downstream point-in-time reconstruction.
+This document describes the current Bronze layer for the FRED/ALFRED lakehouse. Bronze preserves source-like external data, collection lineage, request metadata, canonical FRED series metadata, and enough timing fields for downstream point-in-time reconstruction.
 
 ## Purpose
 
-The Bronze layer has five jobs:
+The Bronze layer has six jobs:
 
 1. Preserve raw FRED/ALFRED API responses and raw observation values.
 2. Store ALFRED revision-aware series as observation versions with `realtime_start`, `realtime_end`, and `vintage_date`.
 3. Store non-revision current-only series in a separate current raw table.
 4. Backfill current-only series whose FRED full history is restricted by using Macrotrends or Yahoo Finance bootstrap sources.
-5. Track every collection run, request parameter hash, payload hash, retry result, and source provider.
+5. Carry canonical FRED metadata such as units, frequency, and seasonal adjustment into all current/bootstrap rows.
+6. Track every collection run, request parameter hash, payload hash, retry result, and source provider.
 
 ## Active Notebooks
 
@@ -18,6 +19,8 @@ The Bronze layer has five jobs:
 notebooks/databricks/
   configs/
     fred_seed_series.json
+    build_fred_series_metadata.py
+    fred_series_metadata.json              generated output
   macrotrends/
     BAMLH0A0HYM2_chart_20260702T065042.csv
   bronze/
@@ -31,51 +34,30 @@ notebooks/databricks/
 
 The active flow is `01a`, `01b`, `01c`, `01d`, `01e`, and `01f`. Older physical daily snapshot experiments are no longer the operating design.
 
-## Seed Routing
+## Seed And Metadata Routing
 
-The seed catalog is `notebooks/databricks/configs/fred_seed_series.json`. It currently contains 27 series: 21 ALFRED-capable series and 6 FRED current-only series.
+The seed catalog is `notebooks/databricks/configs/fred_seed_series.json`. The generated metadata config is documented separately in `docs/fred_series_metadata_config.md`.
+
+`build_fred_series_metadata.py` reads the seed catalog, calls the FRED `/fred/series` endpoint, and writes `fred_series_metadata.json`. The generated file is used by non-FRED bootstrap loaders so Macrotrends and Yahoo rows carry the same canonical FRED metadata that FRED itself would provide.
+
+Important metadata fields:
+
+- `title`
+- `frequency`, `frequency_short`
+- `units`, `units_short`
+- `seasonal_adjustment`, `seasonal_adjustment_short`
+- `observation_start`, `observation_end`, `last_updated`
+- seed fields such as `domain`, `priority`, `expected_frequency`, and `alfred_available`
+
+Routing:
 
 ```text
 alfred_available = true   -> bronze/01a and bronze/01b
 alfred_available = false  -> bronze/01c
-external bootstrap gaps   -> bronze/01d Macrotrends or bronze/01f Yahoo Finance, then bronze/01c refresh
+external bootstrap gaps   -> configs/build_fred_series_metadata.py, then bronze/01d Macrotrends or bronze/01f Yahoo Finance, then bronze/01c refresh
 ```
 
-| Rank | Series ID | Domain | Frequency | Role | Bronze route |
-|---:|---|---|---|---|---|
-| 1 | `GDPC1` | national_accounts | quarterly | Real Gross Domestic Product | ALFRED version |
-| 2 | `PCE` | income_consumption | monthly | Personal Consumption Expenditures | ALFRED version |
-| 3 | `W875RX1` | income_consumption | monthly | Real Personal Income excluding Current Transfer Receipts | FRED current |
-| 4 | `PAYEMS` | labor | monthly | All Employees: Total Nonfarm Payrolls | ALFRED version |
-| 5 | `UNRATE` | labor | monthly | Unemployment Rate | ALFRED version |
-| 6 | `ICSA` | labor | weekly | Initial Claims | ALFRED version |
-| 7 | `AWHMAN` | labor | monthly | Average Weekly Hours: Manufacturing | ALFRED version |
-| 8 | `INDPRO` | production | monthly | Industrial Production Index | ALFRED version |
-| 9 | `CMRMTSPL` | production | monthly | Real Manufacturing and Trade Industries Sales | FRED current |
-| 10 | `CPIAUCSL` | inflation | monthly | Consumer Price Index: All Items | ALFRED version |
-| 11 | `PCEPILFE` | inflation | monthly | Core PCE Price Index | ALFRED version |
-| 12 | `FEDFUNDS` | rates | monthly | Effective Federal Funds Rate | ALFRED version |
-| 13 | `GS10` | rates | monthly | 10-Year Treasury Constant Maturity Rate | ALFRED version |
-| 14 | `T10YFFM` | rates | monthly | spread | FRED current |
-| 15 | `M2SL` | money_credit | monthly | M2 Money Stock | ALFRED version |
-| 16 | `BAMLH0A0HYM2` | credit | daily | ICE BofA US High Yield Index Option-Adjusted Spread | Macrotrends bootstrap + FRED current |
-| 17 | `SP500` | financial_markets | daily | / | Yahoo Finance bootstrap + FRED current |
-| 18 | `PERMIT` | housing | monthly | Building Permits: Total Units | ALFRED version |
-| 19 | `NEWORDER` | investment | monthly | New Orders: Nondefense Capital Goods ex. Aircraft | ALFRED version |
-| 20 | `UMCSENT` | sentiment | monthly | University of Michigan Consumer Sentiment | ALFRED version |
-| 21 | `WALCL` | liquidity | weekly | / | ALFRED version |
-| 22 | `BOGMBASE` | liquidity | monthly | / | ALFRED version |
-| 23 | `DGS10` | rates | daily | 10  / | ALFRED version |
-| 24 | `T10Y2Y` | rates | daily | / | ALFRED version |
-| 25 | `T10Y3M` | rates | daily | 10-3  / | ALFRED version |
-| 26 | `NASDAQCOM` | financial_markets | daily | / | FRED current |
-| 27 | `BOGZ1FL663067003Q` | leverage | quarterly | / margin loan proxy | ALFRED version |
-
-Current-only series:
-
-```text
-W875RX1, CMRMTSPL, T10YFFM, BAMLH0A0HYM2, SP500, NASDAQCOM
-```
+`01d` and `01f` require `fred_series_metadata.json` by default. Their `series_units_json` widget is now an override mechanism, not the primary source of units.
 
 ## Delta Tables
 
@@ -91,7 +73,7 @@ Format : Delta table
 |---|---|
 | `fred_raw_response_payloads` | Raw FRED/ALFRED JSON payloads |
 | `fred_ingestion_runs` | Request-level ingestion history |
-| `fred_series_metadata_versions` | Series metadata versions |
+| `fred_series_metadata_versions` | ALFRED/FRED series metadata versions from versioned loaders |
 | `fred_observation_versions` | ALFRED revision-aware observation versions |
 | `fred_vintage_dates_seen` | ALFRED vintage date checks |
 | `fred_incremental_watermarks` | Incremental watermarks for `01b` |
@@ -99,6 +81,16 @@ Format : Delta table
 | `fred_run_summary` | Bronze run summaries |
 
 `fred_current_observations_raw` keeps `source = fred` for downstream compatibility, while the actual provider is preserved in `data_provider`, such as `fred_api`, `macrotrends`, or `yahoo_finance`.
+
+Current-only raw rows include common observation metadata used by Silver and Gold:
+
+```text
+domain, priority, expected_frequency
+period_start_inferred, period_end_inferred, period_inference_basis
+data_provider, title, frequency, frequency_short
+units, units_short, seasonal_adjustment, seasonal_adjustment_short
+source_metadata_json
+```
 
 ## Notebook Roles
 
@@ -124,11 +116,15 @@ Incremental ALFRED refresh. It uses vintage dates and watermarks to avoid reload
 
 ### `01c_bronze_fred_current_observations.py`
 
-FRED current-only refresh. It stores rows by `source`, `series_id`, and `observation_date`; if a value changes, the row is updated. This notebook also refreshes series that were initially backfilled by Macrotrends or Yahoo Finance.
+FRED current-only refresh. It stores rows by `source`, `series_id`, and `observation_date`; if a value or metadata field changes, the row is updated.
+
+`01c` calls both FRED observations and FRED series metadata. The `observation_start` widget is blank by default; when left blank, the notebook uses `1776-07-04` so current-only loads request the full available FRED history.
 
 ### `01d_bronze_macrotrends_observations.py`
 
 Bootstrap loader for manually downloaded Macrotrends CSV files. It currently supports `BAMLH0A0HYM2` backfill into `fred_current_observations_raw`. These rows are current reconstructed history, not ALFRED vintage records.
+
+Macrotrends does not provide canonical FRED units, so `01d` reads `fred_series_metadata.json` and writes FRED-compatible metadata into the Bronze row.
 
 ### `01e_bronze_alfred_reproducibility_audit.py`
 
@@ -137,6 +133,8 @@ Interactive reproducibility audit. The user selects series and as-of dates, and 
 ### `01f_bronze_yahoo_finance_observations.py`
 
 Bootstrap loader for Yahoo Finance chart history. It currently supports `SP500` via `^GSPC` and writes daily current reconstructed market history into `fred_current_observations_raw`.
+
+Yahoo does not provide FRED units, so `01f` reads `fred_series_metadata.json` and uses Yahoo metadata only as supplemental source lineage.
 
 ## Reproducibility Scope
 
@@ -152,20 +150,22 @@ Direct comparison to original releasing institutions such as BEA, BLS, or the Fe
 Initial build:
 
 ```text
-1. bronze/01a_bronze_fred_bootstrap_versions.py
-2. bronze/01d_bronze_macrotrends_observations.py      when needed
-3. bronze/01f_bronze_yahoo_finance_observations.py   when needed
-4. bronze/01c_bronze_fred_current_observations.py
-5. bronze/01e_bronze_alfred_reproducibility_audit.py
-6. silver/02a_silver_fred_bootstrap_versions.py
-7. silver/02c_silver_fred_current_observations.py
-8. gold/03_gold_fred_asof_features.py
+1. configs/build_fred_series_metadata.py
+2. bronze/01a_bronze_fred_bootstrap_versions.py
+3. bronze/01d_bronze_macrotrends_observations.py      when needed
+4. bronze/01f_bronze_yahoo_finance_observations.py   when needed
+5. bronze/01c_bronze_fred_current_observations.py
+6. bronze/01e_bronze_alfred_reproducibility_audit.py
+7. silver/02a_silver_fred_bootstrap_versions.py
+8. silver/02c_silver_fred_current_observations.py
+9. gold/03_gold_fred_asof_features.py
 ```
 
 Refresh workflow:
 
 ```text
-bronze/01b_bronze_fred_incremental_versions.py
+configs/build_fred_series_metadata.py when seed metadata changes
+-> bronze/01b_bronze_fred_incremental_versions.py
 -> bronze/01c_bronze_fred_current_observations.py
 -> bronze/01e_bronze_alfred_reproducibility_audit.py
 -> silver/02b_silver_fred_incremental_versions.py
@@ -173,4 +173,4 @@ bronze/01b_bronze_fred_incremental_versions.py
 -> gold/03_gold_fred_asof_features.py
 ```
 
-`01d` and `01f` are bootstrap helpers, so they are not normally part of the daily workflow.
+`01d` and `01f` are bootstrap helpers, so they are not normally part of the daily workflow after the initial backfill.

@@ -38,7 +38,7 @@ INCLUDE_MISSING_IN_SILVER = dbutils.widgets.get("include_missing_in_silver").low
 
 SOURCE = "fred"
 TRANSFORM_NAME = "clean_fred_current_observations"
-TRANSFORM_VERSION = "0.1.0"
+TRANSFORM_VERSION = "0.3.0-current-common-observation-fields"
 LOAD_TYPE = "current"
 SILVER_RUN_ID = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 SILVER_PROCESSED_AT_UTC = datetime.now(timezone.utc).isoformat()
@@ -74,6 +74,36 @@ def table_exists(qualified_name: str) -> bool:
             return False
 
 
+def spark_sql_type(data_type) -> str:
+    return data_type.simpleString().upper()
+
+
+def ensure_table_has_columns(table: str, columns: list[tuple[str, str]]) -> None:
+    existing_columns = {field.name for field in spark.table(table.replace("`", "")).schema.fields}
+    for column_name, column_type in columns:
+        if column_name not in existing_columns:
+            spark.sql(f"ALTER TABLE {table} ADD COLUMNS ({quote_ident(column_name)} {column_type})")
+
+
+CURRENT_SOURCE_METADATA_COLUMNS = [
+    ("domain", "STRING"),
+    ("priority", "STRING"),
+    ("expected_frequency", "STRING"),
+    ("period_start_inferred", "STRING"),
+    ("period_end_inferred", "STRING"),
+    ("period_inference_basis", "STRING"),
+    ("data_provider", "STRING"),
+    ("title", "STRING"),
+    ("frequency", "STRING"),
+    ("frequency_short", "STRING"),
+    ("units", "STRING"),
+    ("units_short", "STRING"),
+    ("seasonal_adjustment", "STRING"),
+    ("seasonal_adjustment_short", "STRING"),
+    ("source_metadata_json", "STRING"),
+]
+
+
 spark.sql(f"CREATE CATALOG IF NOT EXISTS {quote_ident(CATALOG)}")
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {quote_ident(CATALOG)}.{quote_ident(SILVER_SCHEMA)}")
 spark.sql(f"USE CATALOG {quote_ident(CATALOG)}")
@@ -86,6 +116,8 @@ print(f"Load type: {LOAD_TYPE}")
 
 if not table_exists(f"{CATALOG}.{BRONZE_SCHEMA}.fred_current_observations_raw"):
     raise ValueError("Bronze table was not found: fred_current_observations_raw. Run bronze/01c first.")
+
+ensure_table_has_columns(bronze_table("fred_current_observations_raw"), CURRENT_SOURCE_METADATA_COLUMNS)
 
 # COMMAND ----------
 
@@ -171,10 +203,10 @@ spark.sql(
     f"""
     CREATE OR REPLACE TEMP VIEW selected_bronze_current AS
     SELECT
-        bronze.*,
-        seed.domain,
-        seed.priority,
-        seed.expected_frequency,
+        bronze.* EXCEPT (domain, priority, expected_frequency),
+        coalesce(bronze.domain, seed.domain) AS domain,
+        coalesce(bronze.priority, seed.priority) AS priority,
+        coalesce(bronze.expected_frequency, seed.expected_frequency) AS expected_frequency,
         seed.description,
         seed.role,
         seed.alfred_available
@@ -208,27 +240,45 @@ spark.sql(
         lower(expected_frequency) AS expected_frequency,
         description,
         role,
+        data_provider,
+        title,
+        frequency,
+        frequency_short,
+        units,
+        units_short,
+        seasonal_adjustment,
+        seasonal_adjustment_short,
+        source_metadata_json,
         'current_only' AS history_type,
         false AS is_point_in_time_safe,
         true AS is_current_value,
         to_date(observation_date) AS observation_date,
-        CASE
-            WHEN lower(expected_frequency) = 'monthly' THEN to_date(date_trunc('MONTH', to_date(observation_date)))
-            WHEN lower(expected_frequency) = 'quarterly' THEN to_date(date_trunc('QUARTER', to_date(observation_date)))
-            WHEN lower(expected_frequency) = 'annual' THEN to_date(date_trunc('YEAR', to_date(observation_date)))
-            WHEN lower(expected_frequency) = 'weekly' THEN date_sub(to_date(observation_date), 6)
-            ELSE to_date(observation_date)
-        END AS period_start,
-        CASE
-            WHEN lower(expected_frequency) = 'monthly' THEN last_day(to_date(observation_date))
-            WHEN lower(expected_frequency) = 'quarterly' THEN date_sub(add_months(to_date(date_trunc('QUARTER', to_date(observation_date))), 3), 1)
-            WHEN lower(expected_frequency) = 'annual' THEN make_date(year(to_date(observation_date)), 12, 31)
-            ELSE to_date(observation_date)
-        END AS period_end,
-        CASE
-            WHEN expected_frequency IS NULL THEN 'observation_date_only'
-            ELSE concat('seed_expected_frequency:', lower(expected_frequency))
-        END AS period_inference_basis,
+        coalesce(
+            to_date(period_start_inferred),
+            CASE
+                WHEN lower(expected_frequency) = 'monthly' THEN to_date(date_trunc('MONTH', to_date(observation_date)))
+                WHEN lower(expected_frequency) = 'quarterly' THEN to_date(date_trunc('QUARTER', to_date(observation_date)))
+                WHEN lower(expected_frequency) = 'annual' THEN to_date(date_trunc('YEAR', to_date(observation_date)))
+                WHEN lower(expected_frequency) = 'weekly' THEN date_sub(to_date(observation_date), 6)
+                ELSE to_date(observation_date)
+            END
+        ) AS period_start,
+        coalesce(
+            to_date(period_end_inferred),
+            CASE
+                WHEN lower(expected_frequency) = 'monthly' THEN last_day(to_date(observation_date))
+                WHEN lower(expected_frequency) = 'quarterly' THEN date_sub(add_months(to_date(date_trunc('QUARTER', to_date(observation_date))), 3), 1)
+                WHEN lower(expected_frequency) = 'annual' THEN make_date(year(to_date(observation_date)), 12, 31)
+                ELSE to_date(observation_date)
+            END
+        ) AS period_end,
+        coalesce(
+            period_inference_basis,
+            CASE
+                WHEN expected_frequency IS NULL THEN 'observation_date_only'
+                ELSE concat('seed_expected_frequency:', lower(expected_frequency))
+            END
+        ) AS period_inference_basis,
         value_raw,
         trim(value_raw) AS value_text,
         try_cast(trim(value_raw) AS DOUBLE) AS value_numeric,
@@ -393,6 +443,15 @@ spark.sql(
         obs.expected_frequency,
         obs.description,
         obs.role,
+        obs.data_provider,
+        obs.title,
+        obs.frequency,
+        obs.frequency_short,
+        obs.units,
+        obs.units_short,
+        obs.seasonal_adjustment,
+        obs.seasonal_adjustment_short,
+        obs.source_metadata_json,
         obs.history_type,
         obs.is_point_in_time_safe,
         obs.is_current_value,
@@ -520,8 +579,17 @@ def ensure_delta_table_from_view(table: str, view_name: str) -> None:
     )
 
 
+def ensure_table_has_source_columns(table: str, view_name: str) -> None:
+    target_table = silver_table(table)
+    existing_columns = {field.name for field in spark.table(target_table.replace("`", "")).schema.fields}
+    for field in spark.table(view_name).schema.fields:
+        if field.name not in existing_columns:
+            spark.sql(f"ALTER TABLE {target_table} ADD COLUMNS ({quote_ident(field.name)} {spark_sql_type(field.dataType)})")
+
+
 def merge_view(table: str, view_name: str, key_fields: list[str]) -> None:
     ensure_delta_table_from_view(table, view_name)
+    ensure_table_has_source_columns(table, view_name)
     columns = spark.table(view_name).columns
     on_clause = " AND ".join([f"target.{quote_ident(field)} <=> source.{quote_ident(field)}" for field in key_fields])
     update_clause = ", ".join([f"target.{quote_ident(column)} = source.{quote_ident(column)}" for column in columns])
@@ -582,6 +650,9 @@ spark.sql(
         first(expected_frequency, true) AS expected_frequency,
         first(domain, true) AS domain,
         first(priority, true) AS priority,
+        first(units, true) AS units,
+        first(units_short, true) AS units_short,
+        first(seasonal_adjustment_short, true) AS seasonal_adjustment_short,
         COUNT(*) AS row_count,
         COUNT(DISTINCT observation_date) AS observation_date_count,
         MIN(observation_date) AS date_min,
@@ -624,6 +695,14 @@ spark.sql(
         first(expected_frequency, true) AS expected_frequency,
         first(description, true) AS description,
         first(role, true) AS role,
+        first(data_provider, true) AS data_provider,
+        first(title, true) AS title,
+        first(frequency, true) AS frequency,
+        first(frequency_short, true) AS frequency_short,
+        first(units, true) AS units,
+        first(units_short, true) AS units_short,
+        first(seasonal_adjustment, true) AS seasonal_adjustment,
+        first(seasonal_adjustment_short, true) AS seasonal_adjustment_short,
         'current_only' AS history_type,
         false AS is_point_in_time_safe,
         COUNT(*) AS observation_row_count,
@@ -696,6 +775,15 @@ spark.sql(
         expected_frequency,
         description,
         role,
+        data_provider,
+        title,
+        frequency,
+        frequency_short,
+        units,
+        units_short,
+        seasonal_adjustment,
+        seasonal_adjustment_short,
+        source_metadata_json,
         history_type,
         is_point_in_time_safe,
         observation_date,
