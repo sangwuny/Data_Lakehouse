@@ -1,4 +1,4 @@
-﻿# Databricks notebook source
+# Databricks notebook source
 # MAGIC %md
 # MAGIC # 01a Bronze FRED Bootstrap Version Load
 # MAGIC
@@ -28,7 +28,8 @@ dbutils.widgets.text("secret_key", "fred_api_key", "Secret key")
 dbutils.widgets.text("seed_catalog_path", "../configs/fred_seed_series.json", "Seed catalog path")
 dbutils.widgets.text("series_ids", "ALL", "Series IDs: GDPC1,UNRATE or ALL")
 dbutils.widgets.dropdown("include_vintages", "true", ["true", "false"], "Include vintage date table")
-dbutils.widgets.text("sleep_seconds", "0.5", "Sleep seconds")
+dbutils.widgets.text("sleep_seconds", "0", "Sleep seconds")
+dbutils.widgets.text("retry_sleep_seconds", "0.01,0.05,0.1", "Retry sleep seconds")
 dbutils.widgets.text("observation_start", "", "Observation start")
 dbutils.widgets.text("observation_end", "", "Observation end")
 dbutils.widgets.text("observation_chunk_years", "5", "Observation fallback chunk years")
@@ -44,6 +45,7 @@ SEED_CATALOG_PATH = dbutils.widgets.get("seed_catalog_path").strip()
 SERIES_IDS_PARAM = dbutils.widgets.get("series_ids").strip()
 INCLUDE_VINTAGES = dbutils.widgets.get("include_vintages").lower() == "true"
 SLEEP_SECONDS = float(dbutils.widgets.get("sleep_seconds"))
+RETRY_SLEEP_SECONDS_PARAM = dbutils.widgets.get("retry_sleep_seconds").strip()
 OBSERVATION_START = dbutils.widgets.get("observation_start").strip() or None
 OBSERVATION_END = dbutils.widgets.get("observation_end").strip() or None
 OBSERVATION_CHUNK_YEARS = max(1, int(dbutils.widgets.get("observation_chunk_years")))
@@ -203,6 +205,16 @@ def stable_hash(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
+def parse_retry_sleep_seconds(value: str) -> list[float]:
+    if not value:
+        return []
+    return [float(item.strip()) for item in value.split(",") if item.strip()]
+
+
+RETRY_SLEEP_SECONDS = parse_retry_sleep_seconds(RETRY_SLEEP_SECONDS_PARAM)
+print("Retry sleep seconds:", ", ".join(str(item) for item in RETRY_SLEEP_SECONDS) or "none")
+
+
 def parse_iso_date(value: str | None) -> date | None:
     if not value:
         return None
@@ -297,15 +309,18 @@ def build_url(endpoint: str, params: dict[str, Any]) -> str:
     return "https://api.stlouisfed.org" + endpoint + "?" + parse.urlencode(params)
 
 
-def fred_get(endpoint: str, params: dict[str, Any], *, max_retries: int = 3, backoff_seconds: float = 1.0) -> dict[str, Any]:
+def fred_get(endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
     clean_params = {key: value for key, value in params.items() if value not in (None, "")}
     request_params = {**clean_params, "api_key": FRED_API_KEY, "file_type": "json"}
     redacted_params = {**clean_params, "api_key": "REDACTED", "file_type": "json"}
     url = build_url(endpoint, request_params)
     redacted_url = build_url(endpoint, redacted_params)
+    retry_schedule = [0.0] + RETRY_SLEEP_SECONDS
 
     last_error: Exception | None = None
-    for attempt in range(1, max_retries + 1):
+    for attempt, retry_sleep_seconds in enumerate(retry_schedule, start=1):
+        if retry_sleep_seconds > 0:
+            time.sleep(retry_sleep_seconds)
         try:
             req = request.Request(url, headers={"User-Agent": "causal-lakehouse-versioned-bronze/0.1"})
             with request.urlopen(req, timeout=30) as response:
@@ -328,15 +343,10 @@ def fred_get(endpoint: str, params: dict[str, Any], *, max_retries: int = 3, bac
             if body:
                 message = f"{message}; body={body[:1000]}"
             last_error = FredApiError(message)
-            if attempt < max_retries:
-                time.sleep(backoff_seconds * attempt)
         except (error.URLError, TimeoutError, json.JSONDecodeError, FredApiError) as exc:
             last_error = exc
-            if attempt < max_retries:
-                time.sleep(backoff_seconds * attempt)
 
-    raise FredApiError(f"FRED request failed after {max_retries} attempts: {last_error}") from last_error
-
+    raise FredApiError(f"FRED request failed after {len(retry_schedule)} attempts: {last_error}") from last_error
 
 def series_metadata(series_id: str) -> dict[str, Any]:
     return fred_get("/fred/series", {"series_id": series_id})
